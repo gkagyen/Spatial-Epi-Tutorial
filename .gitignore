@@ -4,3 +4,14 @@
 .httr-oauth
 .DS_Store
 .quarto
+
+/.quarto/
+/_site/
+/_book/
+**/*.quarto_ipynb
+
+*.html
+*.pdf
+*.png
+*.jpg
+*.zip
