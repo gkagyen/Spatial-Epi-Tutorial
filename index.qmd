@@ -1,0 +1,45 @@
+## Welcome {.unnumbered}
+
+This tutorial provides a complete, **R-only** learning pathway for spatial epidemiology. It is designed specifically for the **Ghana R User Community** in collaboration with AfreDAC. No prior spatial analysis experience is assumed, but you should be comfortable with basic R: installing packages, reading data, and using `dplyr` verbs such as `filter()`, `select()`, and `mutate()`.
+
+::: callout-note
+## R-Only Focus
+
+This tutorial is for the Ghana R User Community. **All tasks**—from data import and preparation to mapping, analysis, and modelling—are performed entirely in R. AfreDAC will handle the QGIS portion separately.
+:::
+
+## What You Will Learn
+
+We will work through six progressive modules:
+
+| Module | Title | Key Skills |
+|----------------------|-------------------|--------------------------------|
+| 1 | R Environment Setup and Spatial Data Import | `sf`, `mlspatial`, CRS, joins |
+| 2 | Disease Mapping in R | `tmap`, `ggplot2`, interactive maps, layout |
+| 3 | Spatial Autocorrelation and Cluster Analysis | `spdep`, Moran's I, LISA, Gi\* hotspots |
+| 4 | Spatial Regression and Environmental Factor Analysis | `terra`, OLS, GWR, `GWmodel` |
+| 5 | Machine Learning for Spatial Epidemiology | `mlspatial`, RF, XGBoost, SVR |
+| 6 | Integrated Application from Data to Decision | Accessibility, R Markdown, ethics |
+
+## Prerequisites
+
+- R (version ≥ 4.1)
+- RStudio (recommended)
+- Basic knowledge of `dplyr` and `ggplot2`
+- No prior GIS or spatial analysis experience required
+
+## How to Use This Tutorial
+
+1.  Open the project file `Spatial Epidemiology R Tutorial.Rproj` in RStudio.
+2.  Work through each module in order (01 → 06).
+3.  Each module is a standalone `.qmd` file with runnable code chunks.
+4.  To render the entire book, run: `quarto::quarto_render()` in the R console.
+5.  To render a single module, open it and click **Render** or press `Ctrl+Shift+K`.
+
+## Key Reference
+
+Azeez, A., & Noel, C. (2025). *Predictive Modelling and Spatial Distribution of Pancreatic Cancer in Africa Using Machine Learning-Based Spatial Model*. Zenodo. https://doi.org/10.5281/zenodo.16529986
+
+## Let's Begin!
+
+Click **Next** or open [Module 1: R Environment Setup and Spatial Data Import](01-setup.qmd) to start Module 1.

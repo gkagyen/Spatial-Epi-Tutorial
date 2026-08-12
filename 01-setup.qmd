@@ -1,0 +1,226 @@
+---
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+# R Environment Setup and Spatial Data Import {#sec-module1}
+
+This module establishes your R spatial epidemiology toolkit and teaches
+you how to import, join, and inspect spatial and health data. By the end
+of this module, you will have a clean `sf` object ready for mapping and
+analysis.
+
+```{r setup-m1}
+#| include: false
+library(sf)
+library(terra)
+library(tmap)
+library(ggplot2)
+library(dplyr)
+library(mlspatial)
+```
+
+------------------------------------------------------------------------
+
+## Install and Load R Packages {#sec-install}
+
+**Purpose:** Install and attach the core spatial epidemiology toolkit.
+
+The table below shows the packages we will use throughout this tutorial
+and their roles:
+
+| Task | Package | Role |
+|------------------------|------------------------|------------------------|
+| Vector spatial data | `sf` | Simple features standard for polygons, points, lines |
+| Raster spatial data | `terra` | Fast raster extraction and processing |
+| Thematic mapping | `tmap`, `ggplot2` | Static and interactive maps |
+| Data manipulation | `dplyr`, `tidyr`, `readr` | Tidy data wrangling |
+| Spatial statistics | `spdep` | Neighbours, Moran's I, Getis-Ord Gi\* |
+| Geographically weighted regression | `GWmodel` | Local regression modelling |
+| Integrated ML + mapping | `mlspatial` | Import, map, model, evaluate |
+| Machine learning engines | `randomForest`, `xgboost`, `e1071`, `caret` | RF, XGB, SVR algorithms |
+
+```{r install-load}
+#| eval: false
+# Install any missing packages
+pkgs <- c("sf", "terra", "tmap", "ggplot2", "dplyr", "tidyr", "readr",
+          "spdep", "GWmodel", "mlspatial", "randomForest", "xgboost", 
+          "e1071", "caret", "knitr", "rmarkdown")
+
+install_if_missing <- function(p) {
+  if (!require(p, character.only = TRUE, quietly = TRUE)) {
+    install.packages(p, repos = "https://cloud.r-project.org/")
+    library(p, character.only = TRUE)
+  }
+}
+invisible(sapply(pkgs, install_if_missing))
+```
+
+::: callout-tip
+## Speed Tip
+
+If you are on a slow internet connection, install packages one at a time
+and restart RStudio after each batch of 3–4 packages.
+:::
+
+**Expected output:** All packages load without error. `mlspatial` should
+be version ≥ 0.1.0.
+
+------------------------------------------------------------------------
+
+## Load Administrative Boundary Data {#sec-load-shp}
+
+**Purpose:** Import polygon shapefiles representing administrative
+regions.
+
+We demonstrate two approaches: (a) built-in data from `mlspatial`
+(fastest for learning), and (b) `sf::st_read()` for your own shapefiles.
+
+```{r load-boundaries}
+# Approach A: Built-in Africa shapefile from mlspatial
+data(africa_shp, package = "mlspatial")
+
+# Inspect the object
+class(africa_shp)
+dim(africa_shp)
+
+# Approach B: Import your own shapefile (commented out)
+# ghana_regions <- sf::st_read("path/to/ghana_regions.shp")
+```
+
+**Key parameters:** - `st_read()` arguments: `dsn` (data source name /
+folder path), `layer` (filename without .shp extension if inside a
+geodatabase). - `quiet = TRUE` suppresses progress messages.
+
+**Expected output:** `africa_shp` is an `sf` data frame with a
+`geometry` column and attribute columns (including `NAME`).
+
+------------------------------------------------------------------------
+
+## Load Health / Disease Incidence Data {#sec-load-health}
+
+**Purpose:** Import tabular disease data and link it to spatial
+boundaries.
+
+```{r load-health}
+# Built-in pancreatic cancer incidence data from mlspatial
+data(panc_incidence, package = "mlspatial")
+
+# Inspect structure
+str(panc_incidence)
+head(panc_incidence)
+```
+
+**Key variables in `panc_incidence`:** - `NAME`: Country name (join
+key) - `incidence`: Age-standardized rate per 100,000 - `female`,
+`male`: Counts by sex - `agea`, `ageb`, `agec`: Age-stratum counts -
+`yra` … `yre`: Yearly incidence rates (2017–2021)
+
+**Expected output:** A tibble with one row per country and columns for
+incidence, demographics, and age groups.
+
+------------------------------------------------------------------------
+
+## Join Health Data to Spatial Data {#sec-join}
+
+**Purpose:** Attach disease attributes to the correct spatial polygons
+so we can map and model them.
+
+```{r join-data}
+# Method 1: mlspatial wrapper (recommended for consistency)
+africa_health <- mlspatial::join_data(
+  sf_data = africa_shp |> 
+    # change ivory coast name to match in both datasets
+    mutate(
+      across(c(NAME, COUNTRYAFF),
+             ~ replace_values(.x, "Côte d'Ivoire" ~ "Cote d'Ivoire")
+     )
+    ),
+  tbl_data = panc_incidence,
+  by = "NAME"
+)
+
+# Method 2: dplyr inner_join (identical result, more familiar syntax)
+# africa_health <- africa_shp |> 
+#   dplyr::inner_join(panc_incidence, by = "NAME")
+
+# Verify the join
+dim(africa_health)
+```
+
+**Key parameters:** - `by`: Character name of the shared key column.
+Both tables **must** share identical spelling and casing. -
+`inner_join()` keeps only rows that match in both tables. Use
+`left_join()` if you want to keep all polygons even without health data.
+
+**Expected output:** An `sf` object with the same number of rows as the
+original shapefile (or fewer if using `inner_join` and some names do not
+match) and all columns from both datasets.
+
+------------------------------------------------------------------------
+
+## Explore the Joined Dataset {#sec-explore}
+
+**Purpose:** Confirm that the join worked and understand the data
+structure.
+
+```{r explore-joined}
+# Structure of the sf object
+str(africa_health)
+
+# First six rows
+head(africa_health, 6)
+
+# Summary of the incidence variable
+summary(africa_health$incidence)
+
+# Check for missing values in key variables
+sum(is.na(africa_health$incidence))
+```
+
+**Expected output:** - `str()` shows a `Classes 'sf' ...` object with a
+`geometry` column of type `MULTIPOLYGON`. - `incidence` is numeric with
+a range roughly between 0.5 and 8.0 (rates per 100,000).
+
+------------------------------------------------------------------------
+
+## Coordinate Reference System (CRS) Management {#sec-crs}
+
+**Purpose:** Ensure all spatial layers share the same projection.
+Mismatched CRS is the most common source of silent errors in spatial
+analysis.
+
+```{r crs-management}
+# View current CRS
+sf::st_crs(africa_health)
+
+# Check if it is geographic (degrees) or projected (meters)
+sf::st_is_longlat(africa_health)
+
+# If you need to transform to a projected CRS for distance calculations
+# Example: Africa Albers Equal Area Conic (EPSG: 102022)
+# africa_projected <- sf::st_transform(africa_health, crs = 102022)
+
+# For this tutorial we keep WGS84/Pseudo-Mercator (EPSG:3857) because tmap 
+# handle it well for visualisation, but we note that distance calculations may
+# be distorted due to projection limitations.
+```
+
+**Key concepts:** - **EPSG:3857** (WGS84/Pseudo-Mercator): Web mapping projection in meters. Good for visualisation and web mapping, but distances are distorted especially away from the equator. Not recommended for accurate distance calculations - **Projected
+CRS** (e.g., UTM zones, Albers, Pseudo-Mercator): Distances in meters. Essential for
+buffers, distances, and GWR bandwidth selection. However Pseudo-Mercartor distorts areas and distances significantly.
+
+**Expected output:** `st_crs()` returns the CRS definition, shows EPSG:3857 (WGS 84/Pseudo-Mercator).`st_is_longlat()` returns `FALSE` because this is a projected CRS (Units in meters), not geographic degrees.
+
+------------------------------------------------------------------------
+
+## Module 1 Checklist {#sec-m1-check .unnumbered}
+
+- [ ] All packages installed and loaded
+- [ ] `africa_shp` imported successfully
+- [ ] `panc_incidence` loaded and inspected
+- [ ] `africa_health` created via `join_data()`
+- [ ] CRS verified and understood
+
+**Next:** Proceed to [Module 2: Disease Mapping in R](02-mapping.qmd).

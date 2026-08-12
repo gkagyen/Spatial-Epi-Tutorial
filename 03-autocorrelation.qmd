@@ -1,0 +1,300 @@
+---
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+# Module 3: Spatial Autocorrelation and Cluster Analysis {#sec-module3}
+
+This module introduces the concept of spatial autocorrelation—whether
+disease rates in one location are similar to rates in nearby locations.
+You will build spatial weights matrices, compute global and local
+Moran's I, detect hotspots with Getis-Ord Gi\*, and visualize the
+results.
+
+```{r setup-m3}
+#| include: false
+library(sf)
+library(spdep)
+library(dplyr)
+library(mlspatial)
+library(tmap)
+
+data(africa_shp, package = "mlspatial")
+data(panc_incidence, package = "mlspatial")
+africa_health <- join_data(
+  africa_shp |> mutate(
+    across(c(NAME, COUNTRYAFF),
+           ~ replace_values(.x, "Côte d'Ivoire" ~ "Cote d'Ivoire"))),
+  panc_incidence, by = "NAME"
+)
+africa_health <- st_make_valid(africa_health)
+```
+
+------------------------------------------------------------------------
+
+## Build Spatial Weights Matrix {#sec-weights}
+
+**Purpose:** Define which polygons are "neighbors" so we can test
+whether disease rates in one country resemble those in adjacent
+countries.
+
+> **Tobler's First Law of Geography:** *Everything is related to
+> everything else, but near things are more related than distant
+> things.*
+
+```{r spatial-weights}
+# Create adjacency neighbor list (queen contiguity: shares any boundary point) using spdep package
+nb <- poly2nb(
+  africa_health, 
+  row.names = africa_health$NAME, 
+  queen = TRUE,
+  snap = 1000
+)
+
+# Convert neighbor list to spatial weights list
+# style = "W" = row-standardized (each row sums to 1)
+# zero.policy = TRUE allows regions with no neighbors (e.g., islands)
+lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+
+# Summary of neighbor connections
+summary(nb)
+```
+
+**Key parameters:** - `poly2nb()`: `queen = TRUE` defines neighbours if
+they share even a single point; `queen = FALSE` (rook) requires a shared
+edge. - `nb2listw()`: `style = "W"` row-standardizes; `"B"` is binary
+(0/1); `"C"` is globally standardized.
+
+**Expected output:** Summary showing average number of links, number of
+regions with 0 neighbors, etc.
+
+------------------------------------------------------------------------
+
+## Calculate Global Moran's I {#sec-global-moran}
+
+**Purpose:** Test whether there is **overall** spatial clustering in the
+disease rate across the entire study area.
+
+```{r global-moran}
+# Method 1: Direct spdep (classic approach, recommended)
+global_moran <- moran.test(
+  x = africa_health$incidence,
+  listw = lw,
+  zero.policy = TRUE,
+  na.action = na.exclude
+)
+print(global_moran)
+
+# Method 2: mlspatial wrapper (computes global + local in one call)
+# autocorr_result <- compute_spatial_autocorr(
+#   sf_data = africa_health,
+#   values = africa_health$incidence,
+#   signif = 0.05
+# )
+# print(autocorr_result$moran)
+```
+
+**Key parameters:**
+
+- `moran.test()`: Tests the null hypothesis of spatial randomness. -
+  Statistic range: −1 (perfect dispersion) to +1 (perfect clustering); 0
+  = random.
+
+**Expected output:**
+
+\- Moran's I statistic: ≈ +1: strong positive autocorrelation (high
+value near high, low near low), ≈ 0: No spatial autocorrelation (random
+pattern) and ≈ -1: Strong negative autocorrelation (high near low, like
+a checkerboard pattern)
+
+\- p value \< 0.05 indicates significant clustering and vise versa.
+
+------------------------------------------------------------------------
+
+## Calculate Local Moran's I (LISA) {#sec-local-moran}
+
+**Purpose:** Identify **which specific locations** contribute to the
+global clustering (local clusters). LISA stands for local indicators of
+Spatial Association.
+
+```{r local-moran}
+# Method 1: spdep localmoran
+local_mi <- localmoran(
+  x = africa_health$incidence,
+  listw = lw,
+  zero.policy = TRUE,
+  na.action = na.exclude
+)
+head(local_mi)
+
+# Attach results to sf object
+africa_health$local_i <- local_mi[, "Ii"]
+africa_health$local_i_p <- local_mi[, "Pr(z != E(Ii))"]
+head(africa_health)
+
+# Method 2: mlspatial (recommended for integrated workflow)
+# The wrapper already added standardized values, spatial lag, local Moran's I,
+# z-scores, p-values, and cluster classification to autocorr_result$data
+# lisa_sf <- autocorr_result$data
+# head(lisa_sf)
+```
+
+**Key parameters:** - \``local_moran()` output is a matrix of the local
+statistics. `Ii` tells the strength and direction of local pattern,
+`E.Ii` tells the baseline under randomness, `Var.Ii` shows the estimate
+uncertainties (variance). `Z.Ii` is the z-score (standardized deviation)
+and `Pr(z != E(Ii))` is the p-value.
+
+**Expected output:** - `localmoran()`: Returns `Ii` (local statistic),
+`E.Ii`(expected statistic), variance, z-score, and p-value for each
+polygon. - the `compute_spatial_autocorr()` from `mlspatial` generates
+the local Moran statistics in addition to the global Moran's.
+
+------------------------------------------------------------------------
+
+## Hotspot Analysis (`Getis-Ord Gi*`) {#sec-gi}
+
+**Purpose:** Distinguish statistically significant **hotspots** (high
+values surrounded by high values) from **coldspots** (low-low) using the
+$Getis-Ord\ Gi^*$ statistic.
+
+```{r hotspot-gi}
+# localG returns z-scores; positive = hotspot, negative = coldspot
+# Note: localG does not allow zero-policy neighbours by default, 
+# so we first add country to its own neigbour list (Useful for Gi*)
+nb_self <- include.self(nb)
+summary(nb_self)
+
+gi_star <- localG(
+  x = africa_health$incidence,
+  listw = nb2listw(nb_self, style='W', zero.policy = TRUE),
+  zero.policy = TRUE
+)
+
+# Add Gi* to dataset
+africa_health <- africa_health |> 
+  mutate(gi_star = as.numeric(gi_star))
+
+# Classify hotspots at alpha = 0.05 (|z| > 1.96)
+# Method 1: Using standard normal distribution sutoff
+africa_health <- africa_health |> 
+  mutate(hotspot = case_when(
+  gi_star > 1.96 ~ "Hotspot (High-High)",
+  gi_star < -1.96 ~ "Coldspot (Low-Low)",
+  TRUE ~ "Not significant"
+ ))
+
+# Method 2: Using the exact p-values from localG (recommended)
+gi_internals <- attr(gi_star, "internals")
+
+africa_health$gi_z <- gi_internals[, "Z(G*i)"]
+africa_health$gi_p <- gi_internals[, "Pr(z != E(G*i))"]
+
+africa_health <- africa_health |> 
+  mutate(
+    hotspot_exact = case_when(
+    gi_z > 0 & gi_p <= 0.05 ~ "Hotspot",
+    gi_z < 0 & gi_p <= 0.05 ~ "Coldspot",
+    TRUE ~ "Not significant"),
+    hotspot_exact = factor(hotspot_exact,
+                           levels = c("Coldspot", "Hotspot", "Not significant"))
+  )
+
+
+table(africa_health$hotspot_exact)
+```
+
+**Key parameters:** -`include.self()`: Adds exactly one neighbour to
+each country (itself). This helps the Gi\* calculation since it works by
+calculating a local sum for each country (its value plus neighbours
+value). It essentially shifts the whole distribution by +1. `localG()`:
+Computes $Gi^*$ which includes the focal unit in its own neighborhood.
+The values calculated are Z scores. - z \> 1.96 indicates a
+statistically significant hotspot; z \< −1.96 indicates a coldspot and z
+near 0 is not significant.
+
+**Expected output:** A frequency table showing how many countries are
+classified as hotspots, coldspots, or non-significant.
+
+------------------------------------------------------------------------
+
+## Visualize Cluster Results {#sec-visualize-clusters}
+
+**Purpose:** Map LISA clusters and Gi\* hotspots to communicate findings
+to decision-makers. The local MI values contains an attribute called
+`quadr`. We can use this to visualise the local clusters.
+
+```{r visualize-clusters}
+# Map LISA clusters from mlspatial
+# extract the quadrant and exact p-values from the local_mi
+africa_health$lisa_quadrant <- attributes(local_mi)$quadr$mean
+
+#filter the quadrants by the 0.05 significance threshold
+africa_health <- africa_health |> 
+  mutate(
+    lisa_cluster = case_when(
+    local_i_p <= 0.05 ~ as.character(lisa_quadrant),
+    TRUE ~ "Not significant"),
+    lisa_cluster = factor(lisa_cluster,
+                          levels = c("Low-Low", "High-Low", "Low-High", "High-High", "Not significant"))
+  )
+
+# Create map
+lisa_colours <- c(
+  "High-High" = "red", 
+  "Low-Low" = "blue", 
+  "High-Low" = "lightpink", 
+  "Low-High" = "lightblue", 
+  "Not significant" = "grey90"
+)
+lisa_map <- tm_shape(africa_health) +
+  tm_polygons(
+    fill = "lisa_cluster",
+    fill.scale = tm_scale_categorical(values = lisa_colours),
+    fill.legend = tm_legend(title = "LISA Clusters (Pancreatic Incidence)"),
+    col = "black",
+    col_alpha = 0.8,
+    lwd = 0.5
+  ) +
+  tm_title("Local Moran's I (LISA) Cluster Map")
+
+# Map Gi* hotspots
+Gi_colours <- c(
+  "Hotspot" = "red",
+  "Coldspot" = "blue",
+  "Not significant" = 'grey90'
+)
+hotspot_map <- tm_shape(africa_health) +
+  tm_polygons(
+    fill = "hotspot_exact", 
+    fill.scale = tm_scale(values = Gi_colours),
+    fill.legend = tm_legend(title = "Gi* Classification")
+  ) +
+  tm_title("Getis-Ord Gi* Hotspots")
+
+hotspots <- tmap_arrange(lisa_map, hotspot_map, ncol =2)
+hotspots
+
+tmap_save(
+  hotspots,
+  filename = "africa_hotspot_panel.png", 
+  width = 12, height = 6, dpi = 300
+)
+```
+
+**Expected output:** A two-panel map. The left panel shows LISA
+clusters; the right panel shows `Gi*` hotspots and coldspots.
+
+------------------------------------------------------------------------
+
+## Module 3 Checklist {#sec-m3-check .unnumbered}
+
+- [ ] Built a spatial weights matrix with `poly2nb()` and `nb2listw()`
+- [ ] Computed Global Moran's I and interpreted the p-value
+- [ ] Computed Local Moran's I (LISA) and identified cluster types
+- [ ] Calculated Getis-Ord Gi\* and classified hotspots/coldspots
+- [ ] Visualized both LISA and Gi\* results side-by-side
+
+**Next:** Proceed to [Module 4: Spatial Regression and Environmental
+Factor Analysis](04-regression.qmd).

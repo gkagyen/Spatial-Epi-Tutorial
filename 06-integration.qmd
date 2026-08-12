@@ -1,0 +1,244 @@
+---
+editor: 
+  markdown: 
+    wrap: sentence
+---
+
+# Module 6: Integrated Application from Data to Decision {#sec-module6}
+
+This final module brings everything together.
+You will overlay disease burden with health facility locations, calculate accessibility distances, generate reproducible reports, and reflect on the ethical dimensions of spatial epidemiology.
+
+```{r setup-m6}
+#| include: false
+library(sf)
+library(terra)
+library(dplyr)
+library(mlspatial)
+library(tmap)
+library(ggplot2)
+
+data(africa_shp, package = "mlspatial")
+data(panc_incidence, package = "mlspatial")
+africa_health <- join_data(
+  africa_shp |> mutate(
+    across(c(NAME, COUNTRYAFF),
+           ~ replace_values(.x, "Côte d'Ivoire" ~ "Cote d'Ivoire"))),
+  panc_incidence, by = "NAME"
+)
+africa_health <- st_make_valid(africa_health)
+
+# Add simulated environmental data
+set.seed(898)  
+n <- nrow(africa_health)
+africa_health <- africa_health |> 
+  mutate(
+    incidence_rate = (incidence/TOTPOP)*100000,
+    smoking_prev = round(runif(n, min = 8, max = 28), 1),
+    obesity_prev = round(runif(n, min = 5, max = 30), 1),
+    diabetes_prev = round(runif(n, min = 2,  max = 11), 1),
+    alcohol_per_capita = round(runif(n, min = 0.5, max = 12), 1),
+    family_history_prev = round(runif(n, min = 3,  max = 10), 1),
+    urbanization_pct = round(runif(n, min = 15, max = 85), 1)
+  )
+
+```
+
+------------------------------------------------------------------------
+
+## Overlay Disease Burden with Service Availability {#sec-overlay-decision}
+
+**Purpose:** Identify under-served areas by superimposing disease burden on health facility locations.
+
+```{r overlay-decision}
+# Classify burden into tertiles (3-groups) for clearer visual communication
+africa_health <- africa_health |>
+  mutate(
+    burden_class = case_when(
+      incidence_rate >= quantile(incidence_rate, 0.67, na.rm = TRUE) ~ "High",
+      incidence_rate >= quantile(incidence_rate, 0.33, na.rm = TRUE) ~ "Medium",
+      TRUE ~ "Low"
+    ),
+    burden_class = factor(burden_class, levels = c("High", "Medium", "Low"))
+  )
+
+# Simulate 70 health facility points across Africa for demonstration
+set.seed(42)
+facility_points <- st_sample(africa_health, size = 70, type = "random") |> 
+  st_as_sf() |> 
+  mutate(facility_id = paste0("FAC_", row_number()),
+         type = "Health Facilities")
+
+decision_map <- tm_shape(africa_health) +
+  tm_fill(
+    "burden_class", 
+    fill.scale = tm_scale(values = c("High"="red","Medium"="yellow","Low"= "green")),
+    fill.legend = tm_legend(title = "Disease Burden") 
+  ) +
+  tm_borders() +
+  tm_shape(facility_points) +
+  tm_dots(
+    fill = "type",
+    fill.scale = tm_scale_categorical(values ="darkblue"),
+    fill.legend = tm_legend(title = "Facilities"),
+    size = 0.4
+  ) +
+  tm_legend(position = c("LEFT", "BOTTOM")) +
+  tm_title( "High Burden vs. Facility Coverage")
+
+decision_map
+```
+
+**Expected output:** A map where red (high burden) polygons without nearby blue dots immediately signal priority areas for new facilities.
+
+------------------------------------------------------------------------
+
+## Distance / Accessibility Analysis {#sec-distance}
+
+**Purpose:** Quantify the distance from each administrative unit to the nearest health facility.
+
+```{r distance-analysis}
+# Transform both facility point and africa health sfobjects to WGS 84 (EPSG:4326)
+# This gives true geodesic distances with st_distance
+africa_health_geo <- st_transform(africa_health, crs = 4326)
+facility_points_geo <- st_transform(facility_points, crs = 4326)
+
+# Calculate centroid of each polygon (using transformed data)
+africa_centroids <- st_centroid(africa_health_geo, of_largest_polygon = TRUE)
+
+# Matrix of geodesic distances (meters) between centroids and facility points
+dist_matrix <- st_distance(africa_centroids, facility_points_geo)
+
+# Minimum distance per country (convert to km) and append to original dataset
+africa_health <- africa_health |>
+  mutate(
+    dist_to_facility_km = as.numeric(apply(dist_matrix, 1, min)) / 1000
+  )
+
+# Summary statistics
+summary(africa_health$dist_to_facility_km)
+
+# Map accessibility
+access_map <- tm_shape(africa_health) +
+  tm_polygons(
+    fill = "dist_to_facility_km", 
+    fill.scale = tm_scale(values = "brewer.bu_pu"),
+    fill.legend = tm_legend(title = "Distance (km)")
+        ) +
+  tm_shape(facility_points) +
+  tm_dots(
+    fill = "type",
+    fill.scale = tm_scale_categorical(values ="red"),
+    fill.legend = tm_legend(title = "Facility"),
+    size = 0.4
+  ) +
+  tm_title("Distance to Nearest Health Facility")
+
+access_map
+```
+
+::: callout-warning
+## CRS and Geodesic Distances
+
+When calculating distances, it is crucial to know your CRS.
+Because our data was transformed to EPSG: 4326 (WGS 84), the sf package uses spherical maths to calculate accurate, real-world geodesic distances, returning the results in meters.
+Dividing by 1000 gives us our kilometres.
+:::
+
+::: callout-note
+While the spherical engine handles distance perfectly, if you are doing highly localized spatial modelling or calculating exact polygon areas in Ghana, it is still best practice to reproject your data to a metric coordinate system like UTM Zone 30N (EPSG: 32630)
+:::
+
+**Expected output:** - Summary statistics of distance.
+- A map showing increasing distance as darker purple fills.
+
+------------------------------------------------------------------------
+
+## Result Interpretation and Report Generation {#sec-report}
+
+**Purpose:** Produce a reproducible, shareable document integrating code, results, and narrative.
+
+R Markdown (`.Rmd`) and Quarto (`.qmd`) are the gold standards for reproducible research.
+Below is a minimal Quarto document skeleton you can adapt:
+
+```` markdown
+---
+title: "Spatial Epidemiology Report: Pancreatic Cancer in Africa"
+format: html
+editor: visual
+---
+
+## Introduction
+This report analyzes the spatial distribution ...
+
+## Data
+``` r
+#| echo: false
+library(mlspatial)
+data(africa_shp)
+data(panc_incidence)
+```
+
+## Results
+The Global Moran's I was 'r round(global_moran$estimate[1], 3' ...
+
+## Conclusion
+High-burden hotspots are concentrated in ...
+````
+
+**Key features:** - **Code chunks** (```` ```{r} ````) execute during rendering.
+- **Inline code** ('r code') updates text automatically when data changes.
+- **Parametrized reports**: Use YAML `params:` to generate country-specific reports from one template.
+
+**Expected output:** An HTML or PDF file containing embedded maps, tables, and narrative—fully reproducible by any colleague who has the `.qmd` file and data.
+
+------------------------------------------------------------------------
+
+## Ethical Considerations {#sec-ethics}
+
+**Purpose:** Reflect on methodological biases and data privacy before disseminating findings.
+
+### Privacy Protection
+
+- **Aggregated data**: The `mlspatial` built-in data are already aggregated to country level, protecting individual identity. Never map exact household locations or small-area counts (\< 5 cases) without differential privacy or aggregation.
+- **Re-identification risk**: Combining spatial coordinates with demographic details (age, sex, date of diagnosis) can re-identify patients in small villages.
+
+### Modifiable Areal Unit Problem (MAUP)
+
+- **Definition**: Results depend on the boundaries chosen. Country-level analysis may hide sub-national hotspots; conversely, fine-scale analysis may produce unstable rates due to small populations.
+- **Mitigation**: Conduct sensitivity analyses at multiple scales (district, region, country) and report how conclusions change.
+
+### Ecological Fallacy
+
+- **Definition**: Relationships observed at the aggregate level do not necessarily hold for individuals. For example, a country with high average temperature and high cancer incidence does not prove that heat causes cancer in individual patients.
+- **Mitigation**: Use language like "areas with higher temperature are associated with higher incidence" rather than "temperature causes cancer."
+
+### Spatial Inequality & Resource Allocation
+
+- Maps are political. Highlighting "high burden" regions can attract funding, but it can also stigmatize communities. Always:
+  1.  Share results with local health officials before publication.
+  2.  Provide confidence intervals or classification uncertainty.
+  3.  Pair burden maps with resource maps (as in @sec-overlay-decision ) to focus on actionable gaps.
+
+------------------------------------------------------------------------
+
+## Closing Remarks {#sec-closing .unnumbered}
+
+You have now completed a full spatial epidemiology workflow in **R only**:
+
+1.  ✅ Imported and joined spatial and health data
+2.  ✅ Created static, interactive, and multi-layer thematic maps
+3.  ✅ Detected global and local spatial autocorrelation
+4.  ✅ Built OLS and Geographically Weighted Regression models
+5.  ✅ Trained and evaluated Random Forest, XGBoost, and SVR models via `mlspatial`
+6.  ✅ Integrated disease burden with service availability and generated reproducible reports
+
+**Next steps for the Ghana R User Community:** - Replace the built-in Africa data with Ghana Health Service district-level data.
+- Download real WorldClim rasters via `geodata::worldclim_global()`.
+- Explore `mlspatial` vignettes: `vignette("mlspatial")` after installing the package.
+
+**Reference:** Azeez, A., & Noel, C.
+(2025).
+*Predictive Modelling and Spatial Distribution of Pancreatic Cancer in Africa Using Machine Learning-Based Spatial Model*.
+Zenodo.
+https://doi.org/10.5281/zenodo.16529986

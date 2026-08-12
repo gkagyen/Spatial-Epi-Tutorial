@@ -1,0 +1,58 @@
+project:
+  type: book
+  output-dir: _book
+
+book:
+  title: "Spatial Epidemiology in R: A Hands-On Tutorial"
+  subtitle: "Ghana R User Community — R-Only Track. Prepared for the Ghana R User Community & AfreDAC Collaboration"  
+  author: "George K. Agyen - Ghana R User Community"
+  reader-mode: true
+  date: "2026-08-05"
+  
+  page-footer:
+    left: "Copyright 2026, George K. Agyen"
+    right: |
+      Thisbook was built with <a href="https://quarto.org/">Quarto</a>
+  
+  cover-image: Spat_epi.png
+  favicon: Spat_epi.png
+  chapters:
+    - index.qmd
+    - 01-setup.qmd
+    - 02-mapping.qmd
+    - 03-autocorrelation.qmd
+    - 04-regression.qmd
+    - 05-ml.qmd
+    - 06-integration.qmd
+
+  page-navigation: true
+  search: true
+  repo-url: https://github.com/gkagyen/spatial-epi-tutorial
+  
+number-depth: 3
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    code-tools: true
+    fig-width: 8
+    fig-height: 6
+    css: styles.css
+    include-in-header:
+      text: |
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  pdf:
+    documentclass: scrreprt
+    toc: true
+    toc-depth: 2
+    fig-width: 8
+    fig-height: 6
+    number-sections: true
+
+execute:
+  warning: false
+  message: false
+  echo: true
