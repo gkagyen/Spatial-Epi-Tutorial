@@ -143,8 +143,6 @@ Spatial Epidemiology R Tutorial/
 
 - [Quarto](https://quarto.org/) — Scientific and technical publishing
 - [RStudio](https://posit.co/) — IDE for R
-- [mlspatial](https://cran.r-project.org/package=mlspatial) — Machine
-  learning and mapping for spatial epidemiology
 
 ------------------------------------------------------------------------
 
