@@ -15,12 +15,14 @@ MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.or
 ## A comprehensive, hands-on tutorial for public health researchers - Built entirely in R.
 
 This repository contains the complete source materials for the
-**Introduction to Spatial Epidemiology for Health Research** tutorial,
-developed for the **AfreDAC team** in collaboration with **Ghana R Users
-Community**. The tutorial teaches spatial data import, disease mapping,
-spatial autocorrelation analysis, geographically weighted regression,
-and machine learning for spatial epidemiology — all without leaving the
-R environment.
+**Introduction to Spatial Epidemiology for Health Research** tutorial
+hosted freely online
+[here](https://gkagyen.github.io/Spatial-Epi-Tutorial/), developed for
+the **AfreDAC team** in collaboration with **Ghana R Users Community**.
+The tutorial teaches spatial data import, disease mapping, spatial
+autocorrelation analysis, geographically weighted regression, and
+machine learning for spatial epidemiology — all without leaving the R
+environment.
 
 ------------------------------------------------------------------------
 
@@ -103,7 +105,9 @@ Spatial Epidemiology R Tutorial/
     ```
 
     Or open any `.qmd` file and press **Ctrl+Shift+K** (Windows/Linux)
-    or **Cmd+Shift+K** (Mac) to render a single module.
+    or **Cmd+Shift+K** (Mac) to render a single module. You can also
+    read the whole tutorial online
+    [here](https://gkagyen.github.io/Spatial-Epi-Tutorial/)
 
 ------------------------------------------------------------------------
 
