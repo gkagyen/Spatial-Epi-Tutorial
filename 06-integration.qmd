@@ -9,6 +9,15 @@ editor:
 This final module brings everything together.
 You will overlay disease burden with health facility locations, calculate accessibility distances, generate reproducible reports, and reflect on the ethical dimensions of spatial epidemiology.
 
+**What you will learn**
+
+- How to combine a disease-burden map with service locations to spot underserved areas.
+- How to compute the distance from each region to its nearest facility.
+- How to turn your analysis into a reproducible report.
+- The ethical obligations that come with mapping people and disease.
+
+This module is the payoff of the whole tutorial: the earlier modules taught you *how* to import, map, model, and predict; this one shows you how those pieces combine into a decision-ready deliverable.
+
 ```{r setup-m6}
 #| include: false
 library(sf)
@@ -22,8 +31,9 @@ data(africa_shp, package = "mlspatial")
 data(panc_incidence, package = "mlspatial")
 africa_health <- join_data(
   africa_shp |> mutate(
-    across(c(NAME, COUNTRYAFF),
-           ~ replace_values(.x, "Côte d'Ivoire" ~ "Cote d'Ivoire"))),
+    NAME       = gsub("Côte d'Ivoire", "Cote d'Ivoire", NAME),
+    COUNTRYAFF = gsub("Côte d'Ivoire", "Cote d'Ivoire", COUNTRYAFF)
+  ),
   panc_incidence, by = "NAME"
 )
 africa_health <- st_make_valid(africa_health)
@@ -41,7 +51,6 @@ africa_health <- africa_health |>
     family_history_prev = round(runif(n, min = 3,  max = 10), 1),
     urbanization_pct = round(runif(n, min = 15, max = 85), 1)
   )
-
 ```
 
 ------------------------------------------------------------------------
@@ -51,7 +60,9 @@ africa_health <- africa_health |>
 **Purpose:** Identify under-served areas by superimposing disease burden on health facility locations.
 
 ```{r overlay-decision}
-# Classify burden into tertiles (3-groups) for clearer visual communication
+#| message: false
+
+# Classify burden into tertiles (3 groups) for clearer visual communication
 africa_health <- africa_health |>
   mutate(
     burden_class = case_when(
@@ -63,7 +74,7 @@ africa_health <- africa_health |>
   )
 
 # Simulate 70 health facility points across Africa for demonstration
-set.seed(42)
+set.seed(4607)
 facility_points <- st_sample(africa_health, size = 70, type = "random") |> 
   st_as_sf() |> 
   mutate(facility_id = paste0("FAC_", row_number()),
@@ -72,24 +83,34 @@ facility_points <- st_sample(africa_health, size = 70, type = "random") |>
 decision_map <- tm_shape(africa_health) +
   tm_fill(
     "burden_class", 
-    fill.scale = tm_scale(values = c("High"="red","Medium"="yellow","Low"= "green")),
-    fill.legend = tm_legend(title = "Disease Burden") 
+    fill.scale = tm_scale(values = c("High"="red","Medium"="yellow","Low"="green")),
+    fill.legend = tm_legend(title = "Disease Burden", 
+                            position = c("left", "bottom")) 
   ) +
   tm_borders() +
   tm_shape(facility_points) +
   tm_dots(
     fill = "type",
     fill.scale = tm_scale_categorical(values ="darkblue"),
-    fill.legend = tm_legend(title = "Facilities"),
+    fill.legend = tm_legend(title = "Facilities", 
+                            position = c("left", "bottom")),
     size = 0.4
   ) +
-  tm_legend(position = c("LEFT", "BOTTOM")) +
-  tm_title( "High Burden vs. Facility Coverage")
+  tm_title("High Burden vs. Facility Coverage") 
 
 decision_map
 ```
 
-**Expected output:** A map where red (high burden) polygons without nearby blue dots immediately signal priority areas for new facilities.
+::: callout-note
+## How the classification works
+
+- `quantile(incidence_rate, 0.67)` returns the value that splits the countries so that roughly two-thirds are below it and one-third above. `case_when()` then labels each country "High", "Medium", or "Low" against the 0.67 and 0.33 cut-points. With 54 countries this produces three groups of 18.
+- Converting `burden_class` to a `factor(levels = c("High","Medium","Low"))` fixes the legend order so "High" appears first.
+- `st_sample(..., type = "random")` drops 70 random points inside the polygons (reproducible thanks to `set.seed(4607)`), standing in for real health-facility coordinates.
+- The map itself layers the burden fill and the facility dots; red polygons with no nearby blue dots are the priority areas.
+:::
+
+**Expected output:** A map where red (high-burden) polygons without nearby blue dots immediately signal priority areas for new facilities.
 
 ------------------------------------------------------------------------
 
@@ -98,7 +119,10 @@ decision_map
 **Purpose:** Quantify the distance from each administrative unit to the nearest health facility.
 
 ```{r distance-analysis}
-# Transform both facility point and africa health sfobjects to WGS 84 (EPSG:4326)
+#| warning: false
+#| message: false
+
+# Transform both facility points and africa_health sf object to WGS 84 (EPSG:4326)
 # This gives true geodesic distances with st_distance
 africa_health_geo <- st_transform(africa_health, crs = 4326)
 facility_points_geo <- st_transform(facility_points, crs = 4326)
@@ -137,19 +161,30 @@ access_map <- tm_shape(africa_health) +
 access_map
 ```
 
+::: callout-note
+## How the distance pipeline works
+
+- `st_centroid(..., of_largest_polygon = TRUE)` places one point at the centre of each country (using the largest piece for multi-part countries such as island nations).
+- `st_distance(africa_centroids, facility_points_geo)` returns a **matrix** with one row per country and one column per facility — cell `(i, j)` is the distance from country *i* to facility *j*. Here that is a 54 × 70 matrix.
+- `apply(dist_matrix, 1, min)` takes the minimum along each *row*, i.e. the distance from each country to its *nearest* facility. Dividing by 1000 converts metres to kilometres.
+- The map then shades countries by that nearest-facility distance — the classic accessibility map used to plan service placement.
+:::
+
 ::: callout-warning
 ## CRS and Geodesic Distances
 
 When calculating distances, it is crucial to know your CRS.
-Because our data was transformed to EPSG: 4326 (WGS 84), the sf package uses spherical maths to calculate accurate, real-world geodesic distances, returning the results in meters.
-Dividing by 1000 gives us our kilometres.
+Because our data was transformed to EPSG:4326 (WGS 84), the `sf` package uses spherical maths to calculate accurate, real-world geodesic distances, returning the results in metres.
+Dividing by 1000 gives us kilometres.
 :::
 
 ::: callout-note
-While the spherical engine handles distance perfectly, if you are doing highly localized spatial modelling or calculating exact polygon areas in Ghana, it is still best practice to reproject your data to a metric coordinate system like UTM Zone 30N (EPSG: 32630)
+## Projected CRS for local analysis
+
+While the spherical engine handles distance perfectly, if you are doing highly localized spatial modelling or calculating exact polygon areas in Ghana, it is still best practice to reproject your data to a metric coordinate system like UTM Zone 30N (EPSG:32630).
 :::
 
-**Expected output:** - Summary statistics of distance.
+**Expected output:** - Summary statistics of distance (here the median is around 346 km, ranging from roughly 29 km to 2,380 km).
 - A map showing increasing distance as darker purple fills.
 
 ------------------------------------------------------------------------
@@ -158,6 +193,7 @@ While the spherical engine handles distance perfectly, if you are doing highly l
 
 **Purpose:** Produce a reproducible, shareable document integrating code, results, and narrative.
 
+A **reproducible report** is one where the text, numbers, tables, and figures are all generated from code, so a colleague (or future you) can re-run it and get identical results.
 R Markdown (`.Rmd`) and Quarto (`.qmd`) are the gold standards for reproducible research.
 Below is a minimal Quarto document skeleton you can adapt:
 
@@ -172,7 +208,7 @@ editor: visual
 This report analyzes the spatial distribution ...
 
 ## Data
-``` r
+```r
 #| echo: false
 library(mlspatial)
 data(africa_shp)
@@ -180,23 +216,34 @@ data(panc_incidence)
 ```
 
 ## Results
-The Global Moran's I was 'r round(global_moran$estimate[1], 3' ...
+The Global Moran's I was 0.074 (inserted via inline code) ...
 
 ## Conclusion
 High-burden hotspots are concentrated in ...
 ````
 
-**Key features:** - **Code chunks** (```` ```{r} ````) execute during rendering.
-- **Inline code** ('r code') updates text automatically when data changes.
-- **Parametrized reports**: Use YAML `params:` to generate country-specific reports from one template.
+::: callout-note
+## The three ingredients of a reproducible report
 
-**Expected output:** An HTML or PDF file containing embedded maps, tables, and narrative—fully reproducible by any colleague who has the `.qmd` file and data.
+- **Code chunks** (```` ```{r} ````) run when the document is rendered, so every figure and table is regenerated from the current data.
+- **Inline code** embeds an R expression directly in a sentence (wrapped in backticks and prefixed with the letter `r`), so computed numbers update automatically when the data changes instead of being typed by hand.
+- **Parameterised reports** use a `params:` block in the YAML header to produce, say, one country report per country from a single template.
+:::
+
+**Key features:** - **Code chunks** (```` ```{r} ````) execute during rendering.
+- **Inline code** embeds R expressions in the text, updating numbers automatically.
+- **Parameterised reports**: Use YAML `params:` to generate country-specific reports from one template.
+
+**Expected output:** An HTML or PDF file containing embedded maps, tables, and narrative — fully reproducible by any colleague who has the `.qmd` file and data.
 
 ------------------------------------------------------------------------
 
 ## Ethical Considerations {#sec-ethics}
 
 **Purpose:** Reflect on methodological biases and data privacy before disseminating findings.
+
+Spatial epidemiology maps *people*, not just polygons.
+Before publishing, it is worth pausing to consider how a map can help — or harm — the communities it describes.
 
 ### Privacy Protection
 
@@ -218,7 +265,66 @@ High-burden hotspots are concentrated in ...
 - Maps are political. Highlighting "high burden" regions can attract funding, but it can also stigmatize communities. Always:
   1.  Share results with local health officials before publication.
   2.  Provide confidence intervals or classification uncertainty.
-  3.  Pair burden maps with resource maps (as in @sec-overlay-decision ) to focus on actionable gaps.
+  3.  Pair burden maps with resource maps (as in @sec-overlay-decision) to focus on actionable gaps.
+
+------------------------------------------------------------------------
+
+## Practical Exercise {#sec-m6-exercise}
+
+Apply the module's two core skills, then check your answers against the solution.
+
+1.  Classify `incidence_rate` into **quartiles** (4 groups labelled "Q1" … "Q4") instead of tertiles, and report how many countries fall in each group.
+2.  Recompute the nearest-facility distance and report the **median** and **maximum** distance in kilometres.
+3.  *(Challenge)* Which country has the largest distance to a facility? Use `which.max()` on the distance column and print that country's name.
+
+::: {.callout-note collapse="true"}
+## Model solution
+
+``` r
+library(sf)
+library(dplyr)
+library(mlspatial)
+
+data(africa_shp, package = "mlspatial")
+data(panc_incidence, package = "mlspatial")
+africa_health <- join_data(
+  africa_shp |> mutate(NAME = gsub("Côte d'Ivoire", "Cote d'Ivoire", NAME)),
+  panc_incidence, by = "NAME"
+)
+africa_health <- st_make_valid(africa_health)
+
+set.seed(898)
+n <- nrow(africa_health)
+africa_health <- africa_health |>
+  mutate(incidence_rate = (incidence / TOTPOP) * 100000)
+
+# 1. Quartile classification
+africa_health <- africa_health |>
+  mutate(burden_q = case_when(
+    incidence_rate >= quantile(incidence_rate, 0.75, na.rm = TRUE) ~ "Q4",
+    incidence_rate >= quantile(incidence_rate, 0.50, na.rm = TRUE) ~ "Q3",
+    incidence_rate >= quantile(incidence_rate, 0.25, na.rm = TRUE) ~ "Q2",
+    TRUE ~ "Q1"
+  ))
+table(africa_health$burden_q)
+
+# 2. Nearest-facility distance
+set.seed(4607)
+facility_points <- st_sample(africa_health, size = 70, type = "random") |>
+  st_as_sf() |>
+  mutate(facility_id = paste0("FAC_", row_number()))
+
+centroids <- st_centroid(st_transform(africa_health, 4326),
+                         of_largest_polygon = TRUE)
+d <- st_distance(centroids, st_transform(facility_points, 4326))
+africa_health$dist_km <- as.numeric(apply(d, 1, min)) / 1000
+
+summary(africa_health$dist_km)          # median and max
+
+# 3. Country farthest from a facility
+africa_health$NAME[which.max(africa_health$dist_km)]
+```
+:::
 
 ------------------------------------------------------------------------
 

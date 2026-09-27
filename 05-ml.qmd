@@ -9,6 +9,14 @@ editor:
 This module showcases the machine learning capabilities of `mlspatial`.
 You will prepare data, train three algorithms (Random Forest, XGBoost, Support Vector Regression), evaluate their performance, and map predictions to identify spatial risk patterns.
 
+**What you will learn**
+
+- How to turn an `sf` object into a clean table ready for ML.
+- What Random Forest, XGBoost, and Support Vector Regression are, in plain terms.
+- The difference between **in-sample** fit and **held-out** (cross-validated) performance — and why it matters.
+- How to run honest, cross-validated evaluation with `caret` and `xgboost`.
+- How to map model predictions back onto the map.
+
 ```{r setup-m5}
 #| include: false
 library(sf)
@@ -26,8 +34,9 @@ data(africa_shp, package = "mlspatial")
 data(panc_incidence, package = "mlspatial")
 africa_health <- join_data(
   africa_shp |> mutate(
-    across(c(NAME, COUNTRYAFF),
-           ~ replace_values(.x, "Côte d'Ivoire" ~ "Cote d'Ivoire"))),
+    NAME       = gsub("Côte d'Ivoire", "Cote d'Ivoire", NAME),
+    COUNTRYAFF = gsub("Côte d'Ivoire", "Cote d'Ivoire", COUNTRYAFF)
+  ),
   panc_incidence, by = "NAME"
 )
 africa_health <- st_make_valid(africa_health)
@@ -54,17 +63,37 @@ africa_health <- africa_health |>
 **Purpose:** Understand what `mlspatial` provides and how it fits into a spatial epidemiology ML workflow, before writing any modelling code.
 
 Traditional spatial epidemiology often requires switching between GIS software, R scripts, and Python notebooks.
-`mlspatial` (Azeez & Noel, 2025) packages together spatial data handling (`sf`), thematic mapping(`tmap`), spatial autocorrelation diagnostics (`spdep`), and machine learning (`randomforest`, `xgboost` and `e1071` ) into a single applied workflow aimed at spatial epidemiologists.
+`mlspatial` (Azeez & Noel, 2025) packages together spatial data handling (`sf`), thematic mapping (`tmap`), spatial autocorrelation diagnostics (`spdep`), and machine learning (`randomForest`, `xgboost` and `e1071`) into a single applied workflow aimed at spatial epidemiologists.
 
 The package provides a number of convenient functions and leans on well-established packages for this workflow.
-In this module we will train three ML algorithms—Random Forest, XGBoost, and Support Vector Regression—to predict pancreatic cancer incidence from our simulated covariates.
+In this module we will train three ML algorithms — Random Forest, XGBoost, and Support Vector Regression — to predict pancreatic cancer incidence from our simulated covariates.
+
+::: callout-note
+## What each `mlspatial` training function does
+
+The `train_*()` functions are thin, friendly wrappers over the underlying
+packages — useful to know because the output is exactly the same as if
+you had called the underlying package yourself:
+
+- `train_rf(data, formula, ntree, seed)` calls
+  `randomForest::randomForest(formula, data, ntree, importance = TRUE)`
+  after fixing the seed.
+- `train_xgb(data, formula, nrounds, max_depth, learning_rate)` builds
+  the model matrix and label internally, then runs
+  `xgboost::xgb.train()` with a squared-error objective.
+- `train_svr(data, formula)` calls `e1071::svm()` with
+  `type = "eps-regression"` and a radial kernel.
+
+The rest of this module explains *what those choices mean* and, most
+importantly, how to evaluate the results honestly.
+:::
 
 ------------------------------------------------------------------------
 
 ## Prepare Data for ML Modelling {#sec-ml-prep}
 
 **Purpose:** Prepare our `sf` object into a clean, geometry-free data frame for machine learning algorithms.
-We drop the geometry column, select only relevant columns and check for missing values and decide whether scaling is needed for each algorithm.
+We drop the geometry column, select only relevant columns and check for missing values, and decide whether scaling is needed for each algorithm.
 
 ```{r ml-prep}
 # Drop geometry and select complete cases
@@ -83,19 +112,47 @@ str(ml_data)
 sum(is.na(ml_data))  
 ```
 
+::: callout-note
+## Why this step exists
+
+Most ML algorithms expect a plain rectangular table of numbers — no
+geometry column, no missing values. So we:
+
+- `st_drop_geometry()` — removes the spatial column. The spatial link is
+  not lost: the *row order* of `ml_data` still matches `africa_health`, so
+  we can paste predictions back onto the map later (as we do in
+  @sec-patterns).
+- `select(...)` — keeps only the outcome and predictors we actually want.
+- `drop_na()` — removes rows with missing values. XGBoost and SVR will
+  error on `NA`, so this is not optional.
+:::
+
 **Key parameters:** - `st_drop_geometry()`: ML algorithms cannot use sf geometry columns; we keep the spatial link via row order for later mapping.
 - `drop_na()`: XGBoost and SVR do not tolerate missing values.
 
-**Expected output:** A plain `data.frame` (no `sf`/`data.fram` dual class) with remaining rows after removing `NAs` and 8 columns.
+**Expected output:** A plain `data.frame` (no `sf`/`data.frame` dual class) with remaining rows after removing `NA`s, and 8 columns.
 
-**On Scaling:** Unlike linear/distance based models, tree-based methods (**Random Forest, XGBoost**) are scale-invariant so standardising predictors has no effect on their fit.
-**SVR** however is distance sensitive (its algorithm computes similarity based on Euclidean distance in feature space), so we scale predictors only immediately before the SVR model fit in @sec-svr, rather than scaling the whole `ml_data` object upfront.
+::: callout-note
+## On scaling
+
+**Tree-based methods** (Random Forest, XGBoost) are **scale-invariant**:
+they make decisions by comparing one value against a threshold, so
+multiplying a predictor by a constant changes nothing. Standardising
+predictors therefore has no effect on their fit.
+
+**SVR**, in contrast, measures similarity using Euclidean distance in
+feature space, so a variable with a large range (like `TOTPOP`, in the
+millions) would dominate one with a small range (like a percentage).
+That is why we scale the predictors — but only immediately before the SVR
+fit in @sec-svr, leaving `ml_data` itself unscaled for the other two
+models.
+:::
 
 ------------------------------------------------------------------------
 
 ## Train a Random Forest Model {#sec-rf}
 
-**Purpose:** Use an ensemble of decision trees to capture non-linear relationships between predictors and `incidence_rate` and inspect variable importance
+**Purpose:** Use an ensemble of decision trees to capture non-linear relationships between predictors and `incidence_rate`, and inspect variable importance.
 
 ```{r train-rf}
 # Train Random Forest regression model
@@ -112,14 +169,43 @@ rf_model <- mlspatial::train_rf(
 print(rf_model)
 ```
 
+::: callout-note
+## What Random Forest is
+
+A **decision tree** repeatedly splits the data on a predictor (e.g.
+"smoking > 20%?") to form groups with similar outcomes. A single tree is
+easy to understand but unstable — small data changes can reshape it
+completely.
+
+A **random forest** grows many trees (here `ntree = 500`), each on a
+random bootstrap sample of the data and a random subset of predictors,
+then averages their predictions. Averaging reduces variance and gives a
+more robust model. Two things fall out of the `print()` output:
+
+- **Mean of squared residuals (MSE)** — the average squared prediction
+  error.
+- **% Var explained** — the proportion of variance the model explains,
+  computed *out-of-bag* (on the data each tree did not see during
+  training). This is an honest, built-in estimate of generalisation.
+:::
+
 **Key parameters:** - `ntree = 500`: Number of trees.
 More trees reduce variance but increase computation time.
 - `seed = 222`: Ensures reproducible random splits.
 
 **Expected output:** A regression `randomForest` object summary showing % variance explained and mean squared error (mean of squared residuals).
 
-Because our six-risk factor covariates were simulated independently of `incidence_rate` (@sec-simulate) , there is absolutely no underlying mathematical pattern to find.
-The negative explained variance means this random forest model performs worse than a model that simply guesses the average incidence rate for every country.
+::: callout-note
+## Reading the result
+
+Because our six risk-factor covariates were simulated independently of
+`incidence_rate` (@sec-simulate), there is no underlying mathematical
+pattern to find. The out-of-bag **% variance explained is only about
+1.3%** — essentially zero. A model that simply predicted the average
+rate for every country would do about as well. This is the expected,
+honest outcome for a signal-free dataset: the algorithm ran correctly
+and correctly found nothing.
+:::
 
 ```{r rf-var-imp}
 rf_var_imp <- caret::varImp(rf_model) |> 
@@ -148,14 +234,28 @@ ggplot(rf_var_imp, aes(x = reorder(Variables, abs(Overall)), y = Overall)) +
   expand_limits(y = c(min(rf_var_imp$Overall) - 1, max(rf_var_imp$Overall) + 1))
 ```
 
-The variable importance plot shows a mildly elevated `TOTPOP` variable as the most important given its earlier partial correlation in @sec-diagnose.
-This bar chart with -negative importance clearly shows that the model is fitting random artefacts than true biological signals.
+::: callout-note
+## Reading the importance plot
+
+`caret::varImp(rf_model)` extracts the importance of each predictor —
+for random forests, the percentage increase in MSE when that variable is
+permuted (shuffled). A **larger positive** value means the model relies
+on it more; a **negative** value means shuffling that variable *improved*
+the model, which happens when a variable contributes nothing but noise.
+
+Here `TOTPOP` is mildly elevated, but the mixed positive/negative bars
+show the model is fitting random artefacts rather than a biological
+signal.
+:::
+
+The variable importance plot shows a mildly elevated `TOTPOP` variable as the most important, given its earlier partial correlation in @sec-diagnose.
+This bar chart with negative importance clearly shows that the model is fitting random artefacts rather than true biological signals.
 
 ------------------------------------------------------------------------
 
 ## Train an XGBoost Model {#sec-xgb}
 
-**Purpose:** Apply gradient boosting—a sequential ensemble that corrects errors of previous trees—for potentially higher accuracy.
+**Purpose:** Apply gradient boosting — a sequential ensemble that corrects errors of previous trees — for potentially higher accuracy.
 
 ```{r train-xgb}
 # XGB requires a numeric matrix but train_xgb() handles that internally
@@ -171,14 +271,32 @@ xgb_model <- train_xgb(
 print(xgb_model)
 ```
 
+::: callout-note
+## What XGBoost is
+
+Where a random forest grows many trees *independently* and averages
+them, **gradient boosting** grows trees *sequentially*: each new tree is
+fitted to the errors left by the previous ones. The result is a strong
+model built from many weak ones.
+
+The key hyperparameters are:
+
+- `nrounds` — the number of boosting rounds (trees added).
+- `max_depth` — how deep each tree may grow; smaller = less overfitting.
+- `learning_rate` (η) — how much each tree's contribution is shrunk;
+  smaller means slower but often better learning (typical 0.01–0.3).
+
+`train_xgb()` handles the bookkeeping of turning the formula into a
+numeric matrix for you.
+:::
+
 **Key parameters:** - `nrounds`: Number of boosting iterations.
 Early stopping is recommended for large datasets.
 - `max_depth`: Controls tree complexity; lower values reduce overfitting.
 - `learning_rate` (η): Shrinks contribution of each tree; typical range 0.01–0.3.
 
 **Expected output:** An `xgb.Booster` object showing the model summary confirming the number of boosting rounds and features used.
-Unlike the random forest summary, xgboost does not print the residual/variance diagnostic directly.
-we compute them explicitly in @sec-eval
+Unlike the random forest summary, xgboost does not print the residual/variance diagnostic directly; we compute them explicitly in @sec-eval.
 
 ```{r xgb-var-imp}
 xgb_var_imp <- xgb.importance(xgb_model) |> 
@@ -186,7 +304,7 @@ xgb_var_imp <- xgb.importance(xgb_model) |>
 
 # Build the plot
 ggplot(xgb_var_imp, aes(x = reorder(Feature, Gain), y = Gain)) +
-  geom_col( width = 0.7, alpha = 0.75, fill = "steelblue") +
+  geom_col(width = 0.7, alpha = 0.75, fill = "steelblue") +
   geom_line(aes(group = 1), colour = "darkslategrey", linewidth = 1) +
   geom_point(colour = "darkslategrey", size = 3) +
   geom_point(colour = "white", size = 1.5) +
@@ -204,15 +322,29 @@ ggplot(xgb_var_imp, aes(x = reorder(Feature, Gain), y = Gain)) +
   theme_minimal(base_size = 12)
 ```
 
-The variable importance bar chart is ranked by `Gain` , the average improvement in the loss function each variable contributes when used in a split.
-As with the random forest `TOTPOP` has the highest `gain` but it is almost similar to some of the covariates.
+::: callout-note
+## Reading `xgb.importance()`
+
+`xgb.importance()` ranks predictors by three measures:
+
+- **Gain** — the average improvement in the loss function each variable
+  contributes when used in a split. This is the headline importance.
+- **Cover** — how many observations pass through splits on that variable.
+- **Frequency** — how often the variable is used in a split.
+
+Unlike random-forest importance, Gain is always non-negative, which is
+why this plot has no bars below zero.
+:::
+
+The variable importance bar chart is ranked by `Gain`, the average improvement in the loss function each variable contributes when used in a split.
+As with the random forest, `TOTPOP` has the highest gain but it is almost similar to some of the covariates.
 Also there is no negative importance in this plot.
 
 ------------------------------------------------------------------------
 
 ## Train a Support Vector Regression Model {#sec-svr}
 
-**Purpose:** Fit a kernel-based model that is robust to high-dimensional data and captures non-linear boundaries via the radial basis function (RBF) after scaling the predictors.
+**Purpose:** Fit a kernel-based model that is robust to high-dimensional data and captures non-linear boundaries via the radial basis function (RBF), after scaling the predictors.
 
 ```{r train-svr}
 # Scale predictors before training
@@ -231,13 +363,31 @@ svr_model <- train_svr(
 print(svr_model)
 ```
 
+::: callout-note
+## What Support Vector Regression is
+
+SVR fits a function that is *flat* — within a margin (ε) it tolerates
+errors, and it only cares about points outside that margin (the
+**support vectors**). The **radial (RBF) kernel** lets it capture
+non-linear relationships by mapping points into a higher-dimensional
+space without doing the maths explicitly.
+
+Two things to note from the summary:
+
+- **Number of support vectors** — here about 49 of the 54 rows, which is
+  typical for small, noisy datasets: the model cannot find a simple
+  structure, so nearly every point ends up supporting the fit.
+- The predictors are scaled first (`scale()` gives each a mean of 0 and
+  SD of 1), because the RBF kernel is distance-based.
+:::
+
 **Key parameters:** - `train_svr()` uses the radial kernel by default (`kernel = "radial"` in `e1071::svm()`).
 - Tuning `cost` and `gamma` via cross-validation (e.g., `caret::train()`) is recommended for production models.
 - `scale()` standardises each predictor to a mean of 0, SD of 1.
-- `as.numeric` strips the matrix class of the `scale` output into a clean numeric column in the dataframe.
+- `as.numeric` strips the matrix class of the `scale()` output into a clean numeric column.
 
-**Expected output:** An `svm` summary showing number of support vectors and model parameters.
-The number of support vectors is fairly high for a 54 row data, which is normal for small datasets.
+**Expected output:** An `svm` summary showing the number of support vectors and model parameters.
+The number of support vectors is fairly high for a 54-row dataset, which is normal for small datasets.
 
 ------------------------------------------------------------------------
 
@@ -246,7 +396,7 @@ The number of support vectors is fairly high for a 54 row data, which is normal 
 **Purpose:** Compare models using standardized accuracy metrics: RMSE (Root Mean Squared Error), MAE (Mean Absolute Error), and R² (coefficient of determination).
 
 ```{r eval-models}
-# Generate in sample predictions from each modeland compute RMSE/MAE/R2
+# Generate in-sample predictions from each model and compute RMSE/MAE/R2
 # using caret::postResample()
 
 # Random Forest predictions
@@ -272,22 +422,46 @@ model_eval <- data.frame(
 model_eval[order(model_eval$RMSE), ]
 ```
 
-**Key parameters:** - `predict()`: Requires a `newdata` to supply the predictor variables to genrate predictions for a particular model.
-- `postResample` compares the predicted values against ground truth (target variable - `incidence_rate`) to generate standard regression performance metrics.
+::: callout-note
+## The three metrics
 
-**Expected output:** A three-row data frame ranking models.
+- **RMSE** — square root of the mean squared error; penalises large
+  errors more, and is in the same units as the outcome.
+- **MAE** — mean absolute error; the average size of an error, easy to
+  interpret.
+- **R²** — the proportion of variance explained (1 = perfect, 0 = no
+  better than predicting the mean).
 
-**Important Point to Note**: These are in-sample (training-set) metrics, every model is evaluated on the same data it was trained on, so R2 here reflects how well each model *fit* the training data, not how well it would *generalise* to new countries.
-Tree-based models in particular (especially XGBoost with enough rounds) can fit training data almost perfectly (memorise) even when the true relationship is weak or nonexixstent - exactly the scenario we have here with our uncorrelated simulated covariates.
-**A high in sample R2 here should not be read as evidence the model has learned a real relationship**, it is a reminder of why held-out cross validation
+`caret::postResample(pred, obs)` computes all three from predictions and
+the true values.
+:::
 
----
+**Key parameters:** - `predict()`: Requires a `newdata` to supply the predictor variables to generate predictions for a particular model.
+- `postResample()` compares the predicted values against ground truth (the target variable, `incidence_rate`) to generate standard regression performance metrics.
 
-## Honest Model Evaluation with `caret`
+**Expected output:** A three-row data frame ranking the models.
 
-**Purpose:** replace `mlspatial`'s `train_*`/`eval_model()` workflow with `caret::train` which provides built-in cross-validation, consistent evaluation across all three algorithms and avoids the in-sample inconsistencies discovered above.
+::: callout-warning
+## In-sample ≠ generalisation
 
-```{r}
+These are **in-sample (training-set)** metrics: every model is evaluated
+on the very data it was trained on. A high R² here means the model
+*memorised* the training data, not that it learned a real relationship.
+Tree-based models in particular (especially XGBoost with enough rounds)
+can fit training data almost perfectly even when the true relationship is
+weak or nonexistent — exactly the scenario we have with our uncorrelated
+simulated covariates. **A high in-sample R² is not evidence of a real
+relationship**; it is a reminder of why we need held-out cross-validation,
+which the next section does.
+:::
+
+------------------------------------------------------------------------
+
+## Honest Model Evaluation with `caret` {#sec-honest-eval}
+
+**Purpose:** Replace the in-sample metrics with `caret::train`, which provides built-in cross-validation, consistent evaluation across all three algorithms, and avoids the in-sample inconsistencies discovered above.
+
+```{r caret-cv}
 # Refit Random Forest, XGBoost and Support Vector Regression
 # using train() from caret via the same repeated 5-fold cross-validation
 set.seed(222)
@@ -308,7 +482,7 @@ svr_cv <- train(
 print(svr_cv)
 
 # Manually cross-validate XGBoost using xgb.cv
-# current version of xgboost breaks with caret::train 
+# (current version of xgboost breaks with caret::train)
 xgb_matrix_full <- xgb.DMatrix(
   data  = as.matrix(ml_data[, predictors]),
   label = ml_data$incidence_rate
@@ -326,7 +500,7 @@ xgb_cv <- xgb.cv(
   nfold = 5,
   showsd = TRUE,
   prediction = TRUE,
-  early_stopping_rounds = 10, #stops at best iter
+  early_stopping_rounds = 10, # stops at best iter
   verbose = 0
 )
 
@@ -337,22 +511,50 @@ cat("\nMAE:", min(xgb_cv$evaluation_log$test_mae_mean))
 cat("\nRsquared:", cor(ml_data$incidence_rate, as.vector(xgb_cv$cv_predict$pred))^2)
 ```
 
-**Key parameter:** -`trainControl()` with "repeatedcv" performs a 5-fold cross validation repeated 5 times with different random fold assignments each time.
--`method="rf"`, `"svmRadial"` is `caret`'s standardised model-methods for random forest and svm.
-There is a current compatibility issue with the latest `xgboost` package and `caret` so we use `xgb.cv` to perform the cross validation for the xgboost model directly via the `xgboost` package.
--`Preprocess` standardises the predictors within each fold for svm.
+::: callout-note
+## What cross-validation does
 
-**Expected output:** the cross validate out of fold metrics fro random forest and support vector regression via `caret::train` and that for xgboost manually calculated.
-Given everything established in this module about our simulated, signal free covariates, all the three model's R2 values now reflect an honest estimation of model performance in stark contrast to the earlier in-sample estimates.
+**k-fold cross-validation** splits the data into *k* parts, repeatedly
+trains on *k−1* parts, and evaluates on the held-out part. Every row is
+predicted by a model that never saw it, so the resulting metric is an
+honest estimate of performance on *new* data — the opposite of the
+in-sample metrics above.
+
+- `trainControl(method = "repeatedcv", number = 5, repeats = 5)` does
+  5-fold CV repeated 5 times with different random splits (25 fits per
+  candidate model), reducing the noise in the estimate.
+- `method = "rf"` and `"svmRadial"` are `caret`'s model codes for random
+  forest and radial-kernel SVM. `preProcess = c("center", "scale")`
+  scales predictors *within each fold* — done inside CV so scaling is not
+  contaminated by the held-out data.
+- The latest `xgboost` has a compatibility issue with `caret::train`, so
+  XGBoost is cross-validated directly with `xgb.cv()`. `early_stopping_rounds`
+  halts training when the held-out error stops improving.
+:::
+
+**Key parameters:** - `trainControl()` with `"repeatedcv"` performs 5-fold cross-validation repeated 5 times with different random fold assignments each time.
+- `method = "rf"`, `"svmRadial"` are `caret`'s standardised model-methods for random forest and SVM.
+- `preProcess` standardises the predictors within each fold for SVM.
+
+**Expected output:** Cross-validated out-of-fold metrics for random forest and SVR (via `caret::train`) and for XGBoost (manually calculated).
+
+::: callout-note
+## The honest result
+
+With no signal in the covariates, the cross-validated R² collapses toward
+zero for all three models (roughly 0.15 for RF, 0.07 for SVR, and ≈ 0 for
+XGBoost) — a stark contrast to the near-perfect in-sample fits. This
+collapse *is* the lesson: never trust a training-set score alone.
+:::
 
 ------------------------------------------------------------------------
 
 ## Identify Spatial Patterns and Risk Factors {#sec-patterns}
 
-**Purpose:** Use trained model's predictions to check whether an spatial pattern emerges in prediction to inform health decision making.
+**Purpose:** Use the trained models' predictions to check whether any spatial pattern emerges, to inform health decision-making.
 
 ```{r ml-patterns}
-# Attach out of fold predictions back onto the spatial object
+# Attach out-of-fold predictions back onto the spatial object
 rf_oof <- rf_cv$pred |> 
   group_by(rowIndex) |> 
   summarise(pred_rf = mean(pred), .groups = "drop") |> 
@@ -425,12 +627,113 @@ pred_svr_map <- tm_shape(africa_health) +
 tmap_arrange(obs_map, pred_rf_map, pred_xgb_map, pred_svr_map, ncol = 2)
 ```
 
-**Expected output:** - A scatterplot with a 1:1 line and Pearson's r.
-- Side-by-side maps showing how well the RF, XGB and SVR model reproduces spatial patterns.
+::: callout-note
+## Reading this section
 
-Across every method in this module - Random Forest, XGBoost, SVR, the consistent finding is that our six simulated lifestyle/genetic covariates carry no real signal.
-This is the intended result of a **teaching dataset**: it demonstrates that the entire ML pipeline (data prep → training → tuning → evaluation → spatial pattern mapping) runs correctly and produces internally consistent honestly interpreted null results.
+- **Out-of-fold predictions** are the predictions made on each row while
+  it was held out during CV. `rf_cv$pred` stores them; we
+  `group_by(rowIndex)` and average over the repeated folds to get one
+  prediction per country, then re-attach them to `africa_health` by row
+  order (the same trick used to drop the geometry earlier).
+- `plot_obs_vs_pred()` draws observed vs predicted with a dashed 1:1
+  line: points hugging that line indicate a good model. For our
+  signal-free data the points scatter widely around it.
+- The four maps compare the observed map with each model's predicted
+  map. If a model had learned a real spatial pattern, its predictions
+  would reproduce the observed map's structure.
+:::
+
+**Expected output:** - A scatterplot with a 1:1 line and Pearson's r.
+- Side-by-side maps showing how well the RF, XGB and SVR models reproduce spatial patterns.
+
+Across every method in this module — Random Forest, XGBoost, SVR — the consistent finding is that our six simulated lifestyle/genetic covariates carry no real signal.
+This is the intended result of a **teaching dataset**: it demonstrates that the entire ML pipeline (data prep → training → tuning → evaluation → spatial pattern mapping) runs correctly and produces internally consistent, honestly interpreted null results.
 When you apply this exact pipeline to real covariate data in your own research, this is the standard of scrutiny that should accompany any reported results.
+
+------------------------------------------------------------------------
+
+## Practical Exercise {#sec-m5-exercise}
+
+Consolidate the module with a few tasks, then check your answers against the solution.
+
+1. Train a Random Forest with `ntree = 200` and a different seed.
+   Report the % variance explained.
+2. Use `xgb.importance()` to list the **top three** predictors by Gain.
+3. Compute the in-sample R² of the SVR model with `postResample()`.
+4. *(Challenge)* Re-run the `caret` random-forest cross-validation with
+   `number = 10` (10-fold) and compare the best RMSE with the 5-fold
+   result above.
+
+::: {.callout-note collapse="true"}
+## Model solution
+
+```r
+library(sf)
+library(dplyr)
+library(tidyr)
+library(mlspatial)
+library(randomForest)
+library(xgboost)
+library(e1071)
+library(caret)
+
+data(africa_shp, package = "mlspatial")
+data(panc_incidence, package = "mlspatial")
+africa_health <- join_data(
+  africa_shp |> mutate(NAME = gsub("Côte d'Ivoire", "Cote d'Ivoire", NAME)),
+  panc_incidence, by = "NAME"
+)
+africa_health <- st_make_valid(africa_health)
+
+set.seed(898)
+n <- nrow(africa_health)
+africa_health <- africa_health |>
+  mutate(
+    incidence_rate = (incidence / TOTPOP) * 100000,
+    smoking_prev = round(runif(n, 8, 28), 1),
+    obesity_prev = round(runif(n, 5, 30), 1),
+    diabetes_prev = round(runif(n, 2, 11), 1),
+    alcohol_per_capita = round(runif(n, 0.5, 12), 1),
+    family_history_prev = round(runif(n, 3, 10), 1),
+    urbanization_pct = round(runif(n, 15, 85), 1)
+  )
+
+ml_data <- africa_health |> st_drop_geometry() |>
+  select(incidence_rate, smoking_prev, obesity_prev, diabetes_prev,
+         alcohol_per_capita, family_history_prev, urbanization_pct, TOTPOP) |>
+  drop_na()
+
+rf_formula <- incidence_rate ~ smoking_prev + obesity_prev + diabetes_prev +
+  alcohol_per_capita + family_history_prev + urbanization_pct + TOTPOP
+predictors <- c("smoking_prev", "obesity_prev", "diabetes_prev",
+                "alcohol_per_capita", "family_history_prev",
+                "urbanization_pct", "TOTPOP")
+
+# 1. Random forest with ntree = 200, new seed
+rf2 <- train_rf(data = ml_data, formula = rf_formula, ntree = 200, seed = 4815)
+tail(rf2$rsq, 1) * 100      # % variance explained (near 0)
+
+# 2. Top-3 XGBoost predictors by Gain
+set.seed(222)
+xgb_model <- train_xgb(data = ml_data, formula = rf_formula,
+                       nrounds = 100, max_depth = 4, learning_rate = 0.1)
+xgb.importance(xgb_model) |> head(3)
+
+# 3. In-sample SVR R-squared
+ml_data_scaled <- ml_data |>
+  mutate(across(all_of(predictors), ~ as.numeric(scale(.x))))
+svr_model <- train_svr(data = ml_data, formula = rf_formula)
+postResample(predict(svr_model, newdata = ml_data_scaled),
+             ml_data$incidence_rate)["Rsquared"]
+
+# 4. 10-fold RF cross-validation
+set.seed(222)
+cv10 <- trainControl(method = "repeatedcv", number = 10, repeats = 5,
+                     savePredictions = "final")
+rf_cv10 <- train(rf_formula, data = ml_data, method = "rf", trControl = cv10)
+min(rf_cv10$results$RMSE)
+```
+:::
 
 ------------------------------------------------------------------------
 
@@ -438,8 +741,10 @@ When you apply this exact pipeline to real covariate data in your own research, 
 
 - [ ] Prepared clean ML data with `st_drop_geometry()`
 - [ ] Trained Random Forest, XGBoost, and SVR models
-- [ ] Evaluated all three models with `eval_model()`
+- [ ] Evaluated all three models with `postResample()`
 - [ ] Compared RMSE, MAE, and R² across algorithms
+- [ ] Re-evaluated honestly with cross-validation
 - [ ] Mapped predictions and identified top risk factors
+- [ ] Practical exercise completed
 
 **Next:** Proceed to [Module 6: Integrated Application from Data to Decision](06-integration.qmd).

@@ -9,8 +9,21 @@ editor:
 This module introduces the concept of spatial autocorrelation—whether
 disease rates in one location are similar to rates in nearby locations.
 You will build spatial weights matrices, compute global and local
-Moran's I, detect hotspots with Getis-Ord Gi\*, and visualize the
+Moran's I, detect hotspots with `Getis-Ord Gi*`, and visualize the
 results.
+
+**What you will learn**
+
+- What spatial autocorrelation is and why it matters in epidemiology.
+- How to define "neighbours" and build a spatial weights matrix.
+- How to test for global clustering with Moran's I.
+- How to locate *where* clustering happens with Local Moran's I (LISA).
+- How to find hotspots/coldspots with `Getis-Ord Gi*.`
+
+> **Tobler's First Law of Geography:** *Everything is related to
+> everything else, but near things are more related than distant
+> things.* Spatial autocorrelation is the formal way to measure whether
+> this is true for your data.
 
 ```{r setup-m3}
 #| include: false
@@ -24,27 +37,42 @@ data(africa_shp, package = "mlspatial")
 data(panc_incidence, package = "mlspatial")
 africa_health <- join_data(
   africa_shp |> mutate(
-    across(c(NAME, COUNTRYAFF),
-           ~ replace_values(.x, "Côte d'Ivoire" ~ "Cote d'Ivoire"))),
+    NAME       = gsub("Côte d'Ivoire", "Cote d'Ivoire", NAME),
+    COUNTRYAFF = gsub("Côte d'Ivoire", "Cote d'Ivoire", COUNTRYAFF)
+  ),
   panc_incidence, by = "NAME"
 )
 africa_health <- st_make_valid(africa_health)
 ```
 
+::: callout-note
+## Why spatial autocorrelation matters
+
+If a disease were randomly distributed, every region's rate would be
+independent of its neighbours. In reality, infectious diseases,
+environmental risk factors, and health-service access all spill across
+borders, so nearby regions tend to resemble each other. Testing for
+spatial autocorrelation tells you whether that resemblance is stronger
+than chance — and, if so, *where* the clusters are. This matters for two
+reasons: it reveals real disease hotspots, and it flags a violation of
+the independence assumption behind ordinary (non-spatial) regression
+models, which Module 4 addresses.
+:::
+
 ------------------------------------------------------------------------
 
 ## Build Spatial Weights Matrix {#sec-weights}
 
-**Purpose:** Define which polygons are "neighbors" so we can test
+**Purpose:** Define which polygons are "neighbours" so we can test
 whether disease rates in one country resemble those in adjacent
 countries.
 
-> **Tobler's First Law of Geography:** *Everything is related to
-> everything else, but near things are more related than distant
-> things.*
+Every spatial statistic needs a definition of **"who is near whom"**.
+That definition is stored in a *spatial weights matrix*: for each
+region, a list of its neighbours and the weight given to each.
 
 ```{r spatial-weights}
-# Create adjacency neighbor list (queen contiguity: shares any boundary point) using spdep package
+# Create adjacency neighbour list (queen contiguity: shares any boundary point)
 nb <- poly2nb(
   africa_health, 
   row.names = africa_health$NAME, 
@@ -52,22 +80,48 @@ nb <- poly2nb(
   snap = 1000
 )
 
-# Convert neighbor list to spatial weights list
+# Convert neighbour list to spatial weights list
 # style = "W" = row-standardized (each row sums to 1)
 # zero.policy = TRUE allows regions with no neighbors (e.g., islands)
 lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
 
-# Summary of neighbor connections
+# Summary of neighbour connections
 summary(nb)
 ```
+
+::: callout-note
+## Reading the weights-matrix code
+
+- `poly2nb()` builds the *neighbour list*. For polygon data the usual
+  rule is **contiguity**: two regions are neighbours if they touch.
+  `queen = TRUE` (queen contiguity) treats them as neighbours if they
+  share any point or edge, like chess-queen moves; `queen = FALSE` (rook
+  contiguity) requires a shared *edge*.
+- `snap = 1000` is a distance tolerance in the units of your data.
+  Because `africa_health` is projected in metres (EPSG:3857), this
+  tolerates gaps up to 1,000 m between supposedly adjacent borders — a
+  common fix for boundaries that don't quite line up.
+- `row.names` attaches the country name to each entry, making the object
+  easier to read.
+- `nb2listw()` converts the neighbour list into *weights*. `style = "W"`
+  row-standardizes, so each neighbour's weight is
+  `1 / (number of neighbours)` and every row sums to 1. Alternatives are
+  `"B"` (binary 0/1) and `"C"` (globally standardized).
+- `zero.policy = TRUE` is essential here: island countries have no
+  contiguous neighbours, and without this flag the functions would error
+  on them.
+:::
 
 **Key parameters:** - `poly2nb()`: `queen = TRUE` defines neighbours if
 they share even a single point; `queen = FALSE` (rook) requires a shared
 edge. - `nb2listw()`: `style = "W"` row-standardizes; `"B"` is binary
 (0/1); `"C"` is globally standardized.
 
-**Expected output:** Summary showing average number of links, number of
-regions with 0 neighbors, etc.
+**Expected output:** The `summary(nb)` reports 54 regions connected by
+214 links (an average of about 4 neighbours each), with **6 regions
+having no neighbours** — the island nations Cabo Verde, Comoros, São
+Tomé and Príncipe, Madagascar, Mauritius, and Seychelles. There are 7
+disconnected sub-graphs (the mainland plus six islands).
 
 ------------------------------------------------------------------------
 
@@ -75,6 +129,9 @@ regions with 0 neighbors, etc.
 
 **Purpose:** Test whether there is **overall** spatial clustering in the
 disease rate across the entire study area.
+
+Global Moran's I summarizes the whole map with a single number: are
+similar values generally near each other?
 
 ```{r global-moran}
 # Method 1: Direct spdep (classic approach, recommended)
@@ -95,6 +152,30 @@ print(global_moran)
 # print(autocorr_result$moran)
 ```
 
+::: callout-note
+## Interpreting Moran's I
+
+Moran's I ranges from **−1 to +1**:
+
+- **+1** — perfect clustering: high values cluster with high, low with
+  low.
+- **0** — no spatial autocorrelation: values are arranged randomly.
+- **−1** — perfect dispersion: high values sit next to low ones (a
+  "checkerboard" pattern).
+
+`moran.test()` compares the observed I (Index) against a null hypothesis
+of spatial randomness and returns a p-value. A p-value below 0.05 means
+the clustering is unlikely to be due to chance.
+
+**In this dataset the observed I is about −0.07 with a p-value of about
+0.75.** That is close to zero and *not* significant, so there is no
+strong continent-wide clustering of incidence. This is an important
+result in itself: a global statistic can be non-significant **even when
+there are local clusters** (a few high-value regions cancelling out a
+few low-value ones). That is exactly why we turn next to *local*
+statistics.
+:::
+
 **Key parameters:**
 
 - `moran.test()`: Tests the null hypothesis of spatial randomness. -
@@ -103,20 +184,24 @@ print(global_moran)
 
 **Expected output:**
 
-\- Moran's I statistic: ≈ +1: strong positive autocorrelation (high
-value near high, low near low), ≈ 0: No spatial autocorrelation (random
-pattern) and ≈ -1: Strong negative autocorrelation (high near low, like
-a checkerboard pattern)
+- Moran's I statistic ≈ +1: strong positive autocorrelation (high value
+  near high, low near low); ≈ 0: no spatial autocorrelation (random
+  pattern); ≈ −1: strong negative autocorrelation (high near low, like a
+  checkerboard pattern).
 
-\- p value \< 0.05 indicates significant clustering and vise versa.
+- A p-value \< 0.05 indicates significant clustering, and vice versa.
 
 ------------------------------------------------------------------------
 
 ## Calculate Local Moran's I (LISA) {#sec-local-moran}
 
 **Purpose:** Identify **which specific locations** contribute to the
-global clustering (local clusters). LISA stands for local indicators of
+global clustering (local clusters). LISA stands for Local Indicators of
 Spatial Association.
+
+While the global statistic gives one number for the whole map, LISA
+computes a statistic **per region**, so you can map where the clusters
+are.
 
 ```{r local-moran}
 # Method 1: spdep localmoran
@@ -140,14 +225,37 @@ head(africa_health)
 # head(lisa_sf)
 ```
 
-**Key parameters:** - \``local_moran()` output is a matrix of the local
+::: callout-note
+## Reading the LISA output
+
+`localmoran()` returns a matrix with one row per region and these
+columns:
+
+- `Ii` — the local Moran statistic: its sign and size show the strength
+  and direction of the local pattern.
+- `E.Ii` — the expected value under spatial randomness (the baseline).
+- `Var.Ii` — the variance (uncertainty) of that estimate.
+- `Z.Ii` — the z-score (how many standard errors `Ii` is from `E.Ii`).
+- `Pr(z != E(Ii))` — the p-value for that region.
+
+A region with a small p-value (e.g. \< 0.05) is a *significant* local
+cluster. Note that the six island countries with no neighbours receive
+`NA` here — their local statistic is undefined, which is why
+`zero.policy = TRUE` was needed.
+
+The quadrant classification (High-High, Low-Low, etc.) is stored in an
+attribute rather than the matrix itself; we extract it in the
+visualization section below.
+:::
+
+**Key parameters:** - `local_moran()` output is a matrix of the local
 statistics. `Ii` tells the strength and direction of local pattern,
 `E.Ii` tells the baseline under randomness, `Var.Ii` shows the estimate
 uncertainties (variance). `Z.Ii` is the z-score (standardized deviation)
 and `Pr(z != E(Ii))` is the p-value.
 
 **Expected output:** - `localmoran()`: Returns `Ii` (local statistic),
-`E.Ii`(expected statistic), variance, z-score, and p-value for each
+`E.Ii` (expected statistic), variance, z-score, and p-value for each
 polygon. - the `compute_spatial_autocorr()` from `mlspatial` generates
 the local Moran statistics in addition to the global Moran's.
 
@@ -159,16 +267,22 @@ the local Moran statistics in addition to the global Moran's.
 values surrounded by high values) from **coldspots** (low-low) using the
 $Getis-Ord\ Gi^*$ statistic.
 
+Where LISA asks "is this region *correlated* with its neighbours?", the
+Gi\* statistic asks a subtly different question: "is this region part of
+a cluster of **high** (or **low**) values?" It is the standard tool for
+labelling hotspots and coldspots on a map.
+
 ```{r hotspot-gi}
 # localG returns z-scores; positive = hotspot, negative = coldspot
-# Note: localG does not allow zero-policy neighbours by default, 
-# so we first add country to its own neigbour list (Useful for Gi*)
+# Note: Because we want to know if a target country combined with
+# its neighbours is a hotspot or not, 
+# we first add country to its own neighbour list (useful for Gi*)
 nb_self <- include.self(nb)
 summary(nb_self)
 
 gi_star <- localG(
   x = africa_health$incidence,
-  listw = nb2listw(nb_self, style='W', zero.policy = TRUE),
+  listw = nb2listw(nb_self, style = 'W', zero.policy = TRUE),
   zero.policy = TRUE
 )
 
@@ -177,13 +291,13 @@ africa_health <- africa_health |>
   mutate(gi_star = as.numeric(gi_star))
 
 # Classify hotspots at alpha = 0.05 (|z| > 1.96)
-# Method 1: Using standard normal distribution sutoff
+# Method 1: Using the standard normal distribution cutoff
 africa_health <- africa_health |> 
   mutate(hotspot = case_when(
-  gi_star > 1.96 ~ "Hotspot (High-High)",
-  gi_star < -1.96 ~ "Coldspot (Low-Low)",
-  TRUE ~ "Not significant"
- ))
+    gi_star > 1.96 ~ "Hotspot (High-High)",
+    gi_star < -1.96 ~ "Coldspot (Low-Low)",
+    TRUE ~ "Not significant"
+  ))
 
 # Method 2: Using the exact p-values from localG (recommended)
 gi_internals <- attr(gi_star, "internals")
@@ -194,9 +308,9 @@ africa_health$gi_p <- gi_internals[, "Pr(z != E(G*i))"]
 africa_health <- africa_health |> 
   mutate(
     hotspot_exact = case_when(
-    gi_z > 0 & gi_p <= 0.05 ~ "Hotspot",
-    gi_z < 0 & gi_p <= 0.05 ~ "Coldspot",
-    TRUE ~ "Not significant"),
+      gi_z > 0 & gi_p <= 0.05 ~ "Hotspot",
+      gi_z < 0 & gi_p <= 0.05 ~ "Coldspot",
+      TRUE ~ "Not significant"),
     hotspot_exact = factor(hotspot_exact,
                            levels = c("Coldspot", "Hotspot", "Not significant"))
   )
@@ -205,37 +319,61 @@ africa_health <- africa_health |>
 table(africa_health$hotspot_exact)
 ```
 
-**Key parameters:** -`include.self()`: Adds exactly one neighbour to
+::: callout-note
+## How Gi\* works
+
+- `include.self(nb)` adds each region to its *own* neighbour list. The
+  Gi\* statistic differs from LISA in that it explicitly includes the
+  focal unit in the local sum — a region is a hotspot only if it is high
+  **and** surrounded by highs.
+- `localG()` then computes the statistic for every region. The values it
+  returns are **z-scores**, standardised against the null hypothesis of
+  no clustering.
+- A z-score above **+1.96** marks a significant hotspot (top 2.5% of a
+  normal distribution); below **−1.96** a significant coldspot; values
+  in between are "not significant". Method 1 applies this 1.96 cut-off
+  directly, while Method 2 uses each region's exact p-value (equivalent
+  but slightly cleaner).
+- `attr(gi_star, "internals")` is where `localG()` hides the detailed
+  output — a matrix with columns `G*i`, `E(G*i)`, `V(G*i)`, `Z(G*i)`,
+  and `Pr(z != E(G*i))`.
+- The final `factor(..., levels = ...)` fixes the order of the
+  categories so the legend always reads "Coldspot, Hotspot, Not
+  significant" rather than alphabetical order.
+:::
+
+**Key parameters:** - `include.self()`: Adds exactly one neighbour to
 each country (itself). This helps the Gi\* calculation since it works by
-calculating a local sum for each country (its value plus neighbours
-value). It essentially shifts the whole distribution by +1. `localG()`:
-Computes $Gi^*$ which includes the focal unit in its own neighborhood.
-The values calculated are Z scores. - z \> 1.96 indicates a
-statistically significant hotspot; z \< −1.96 indicates a coldspot and z
-near 0 is not significant.
+calculating a local sum for each country (its value plus neighbours'
+values). - `localG()`: Computes $Gi^*$ which includes the focal unit in
+its own neighbourhood. The values calculated are Z scores. - z \> 1.96
+indicates a statistically significant hotspot; z \< −1.96 indicates a
+coldspot and z near 0 is not significant.
 
 **Expected output:** A frequency table showing how many countries are
-classified as hotspots, coldspots, or non-significant.
+classified as hotspots, coldspots, or non-significant. For this dataset
+the result is typically **3 hotspots, 0 coldspots, and 51
+non-significant** countries.
 
 ------------------------------------------------------------------------
 
 ## Visualize Cluster Results {#sec-visualize-clusters}
 
 **Purpose:** Map LISA clusters and Gi\* hotspots to communicate findings
-to decision-makers. The local MI values contains an attribute called
-`quadr`. We can use this to visualise the local clusters.
+to decision-makers. The local MI values contain an attribute called
+`quadr` (quadrant); we can use this to visualize the local clusters.
 
 ```{r visualize-clusters}
-# Map LISA clusters from mlspatial
-# extract the quadrant and exact p-values from the local_mi
+# Map LISA clusters by extracting
+# the quadrant and exact p-values from the local_mi
 africa_health$lisa_quadrant <- attributes(local_mi)$quadr$mean
 
-#filter the quadrants by the 0.05 significance threshold
+# filter the quadrants by the 0.05 significance threshold
 africa_health <- africa_health |> 
   mutate(
     lisa_cluster = case_when(
-    local_i_p <= 0.05 ~ as.character(lisa_quadrant),
-    TRUE ~ "Not significant"),
+      local_i_p <= 0.05 ~ as.character(lisa_quadrant),
+      TRUE ~ "Not significant"),
     lisa_cluster = factor(lisa_cluster,
                           levels = c("Low-Low", "High-Low", "Low-High", "High-High", "Not significant"))
   )
@@ -273,7 +411,7 @@ hotspot_map <- tm_shape(africa_health) +
   ) +
   tm_title("Getis-Ord Gi* Hotspots")
 
-hotspots <- tmap_arrange(lisa_map, hotspot_map, ncol =2)
+hotspots <- tmap_arrange(lisa_map, hotspot_map, ncol = 2)
 hotspots
 
 tmap_save(
@@ -283,8 +421,104 @@ tmap_save(
 )
 ```
 
+::: callout-note
+## Reading the visualization code
+
+- `attributes(local_mi)$quadr$mean` extracts the quadrant classification
+  from the `localmoran()` output. The four quadrants are named by the
+  region's value and its neighbours' values: **High-High** (a hot
+  cluster), **Low-Low** (a cold cluster), **High-Low** (a high region
+  surrounded by lows), and **Low-High** (the inverse).
+- `case_when(local_i_p <= 0.05 ~ ..., TRUE ~ "Not significant")` keeps
+  only the quadrants that are statistically significant, and relabels
+  the rest. (Regions whose p-value is `NA` — the islands — fall through
+  to "Not significant".)
+- The named colour vector `lisa_colours` maps each category to a fixed
+  colour, and `tm_scale_categorical()` applies it. Giving the `factor()`
+  an explicit `levels` order guarantees the legend order matches the
+  colours.
+- `tmap_arrange(..., ncol = 2)` places the two maps side by side, and
+  `tmap_save()` writes the panel to a PNG at 300 dpi.
+:::
+
 **Expected output:** A two-panel map. The left panel shows LISA
 clusters; the right panel shows `Gi*` hotspots and coldspots.
+
+------------------------------------------------------------------------
+
+## Practical Exercise {#sec-m3-exercise}
+
+Re-run the whole workflow for a different variable — the male case
+counts (`male`) — and check your answers against the solution.
+
+1.  Build a **rook** contiguity neighbour list (`queen = FALSE`, keeping
+    `snap = 1000`). How does the total number of links compare with the
+    queen version above?
+2.  Compute global Moran's I for `male` and state whether clustering is
+    significant at the 0.05 level.
+3.  Compute local Moran's I for `male`. How many regions have a
+    significant (p ≤ 0.05) local statistic?
+4.  Run Getis-Ord Gi\* on `male` and report how many hotspots and
+    coldspots you find.
+5.  *(Challenge)* Map the Gi\* result for `male` using `tm_polygons()`
+    with your own colour scheme.
+
+::: {.callout-note collapse="true"}
+## Model solution
+
+``` r
+library(sf)
+library(spdep)
+library(dplyr)
+library(mlspatial)
+library(tmap)
+
+data(africa_shp, package = "mlspatial")
+data(panc_incidence, package = "mlspatial")
+africa_health <- join_data(
+  africa_shp |> mutate(NAME = gsub("Côte d'Ivoire", "Cote d'Ivoire", NAME)),
+  panc_incidence, by = "NAME"
+)
+africa_health <- st_make_valid(africa_health)
+
+# 1. Rook contiguity
+nb_rook <- poly2nb(africa_health, queen = FALSE, snap = 1000)
+summary(nb_rook)   # fewer links than the queen version (shared edges only)
+
+# 2. Global Moran's I for male
+lw_rook <- nb2listw(nb_rook, style = "W", zero.policy = TRUE)
+moran.test(africa_health$male, listw = lw_rook,
+           zero.policy = TRUE, na.action = na.exclude)
+
+# 3. Local Moran's I for male
+lm_male <- localmoran(africa_health$male, listw = lw_rook,
+                      zero.policy = TRUE, na.action = na.exclude)
+sum(lm_male[, "Pr(z != E(Ii))"] <= 0.05, na.rm = TRUE)
+
+# 4. Getis-Ord Gi* for male
+nb_self <- include.self(nb_rook)
+gi_male <- localG(africa_health$male,
+                  listw = nb2listw(nb_self, style = "W", zero.policy = TRUE),
+                  zero.policy = TRUE)
+gi_int <- attr(gi_male, "internals")
+africa_health$gi_z <- gi_int[, "Z(G*i)"]
+africa_health$gi_p <- gi_int[, "Pr(z != E(G*i))"]
+africa_health <- africa_health |>
+  mutate(hotspot = case_when(
+    gi_z > 0 & gi_p <= 0.05 ~ "Hotspot",
+    gi_z < 0 & gi_p <= 0.05 ~ "Coldspot",
+    TRUE ~ "Not significant"))
+table(africa_health$hotspot)
+
+# 5. Map the Gi* result
+cols <- c("Hotspot" = "red", "Coldspot" = "blue", "Not significant" = "grey90")
+tm_shape(africa_health) +
+  tm_polygons(fill = "hotspot",
+              fill.scale = tm_scale_categorical(values = cols),
+              fill.legend = tm_legend(title = "Gi* (male)")) +
+  tm_title("Getis-Ord Gi* Hotspots — Male Cases")
+```
+:::
 
 ------------------------------------------------------------------------
 
@@ -295,6 +529,7 @@ clusters; the right panel shows `Gi*` hotspots and coldspots.
 - [ ] Computed Local Moran's I (LISA) and identified cluster types
 - [ ] Calculated Getis-Ord Gi\* and classified hotspots/coldspots
 - [ ] Visualized both LISA and Gi\* results side-by-side
+- [ ] Practical exercise completed
 
 **Next:** Proceed to [Module 4: Spatial Regression and Environmental
 Factor Analysis](04-regression.qmd).

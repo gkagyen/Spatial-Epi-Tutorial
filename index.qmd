@@ -1,11 +1,11 @@
 ## Welcome {.unnumbered}
 
-This tutorial provides a complete, **R-only** learning pathway for spatial epidemiology. It is designed specifically for the **Ghana R User Community** in collaboration with AfreDAC. No prior spatial analysis experience is assumed, but you should be comfortable with basic R: installing packages, reading data, and using `dplyr` verbs such as `filter()`, `select()`, and `mutate()`.
+This tutorial provides a complete, **R-only** learning pathway for spatial epidemiology. It is designed specifically for the beginners in spatial epidemiology. No prior spatial analysis experience is assumed, but you should be comfortable with basic R: installing packages, reading data, and using `dplyr` verbs such as `filter()`, `select()`, and `mutate()`.
 
 ::: callout-note
 ## R-Only Focus
 
-This tutorial is for the Ghana R User Community. **All tasks**—from data import and preparation to mapping, analysis, and modelling—are performed entirely in R. AfreDAC will handle the QGIS portion separately.
+This tutorial is for the **Afredac beginner introduction to Spatial Epidemiology for Health Researchers** in collaboration with the **Ghana R Users Community**. **All tasks**—from data import and preparation to mapping, analysis, and modelling—are performed entirely in R.
 :::
 
 ## What You Will Learn
@@ -13,7 +13,7 @@ This tutorial is for the Ghana R User Community. **All tasks**—from data impor
 We will work through six progressive modules:
 
 | Module | Title | Key Skills |
-|----------------------|-------------------|--------------------------------|
+|----|----|----|
 | 1 | R Environment Setup and Spatial Data Import | `sf`, `mlspatial`, CRS, joins |
 | 2 | Disease Mapping in R | `tmap`, `ggplot2`, interactive maps, layout |
 | 3 | Spatial Autocorrelation and Cluster Analysis | `spdep`, Moran's I, LISA, Gi\* hotspots |
@@ -30,7 +30,7 @@ We will work through six progressive modules:
 
 ## How to Use This Tutorial
 
-1.  Open the project file `Spatial Epidemiology R Tutorial.Rproj` in RStudio.
+1.  Clone the [repo](https://github.com/gkagyen/Spatial-Epi-Tutorial) from github and open the project file `Spatial Epidemiology R Tutorial.Rproj` in RStudio.
 2.  Work through each module in order (01 → 06).
 3.  Each module is a standalone `.qmd` file with runnable code chunks.
 4.  To render the entire book, run: `quarto::quarto_render()` in the R console.

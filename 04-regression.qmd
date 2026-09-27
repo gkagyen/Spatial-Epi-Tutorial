@@ -11,6 +11,17 @@ will simulate covariates, build a global OLS model, test its residuals
 for spatial autocorrelation, and then fit a Geographically Weighted
 Regression (GWR) to capture spatially varying relationships.
 
+**What you will learn**
+
+- How to assemble risk-factor covariates for a regression.
+- How to fit and interpret an ordinary least squares (OLS) model.
+- How to spot **data leakage** — a perfect fit that means the outcome
+  was derived from its own predictors.
+- Why we model *rates* rather than raw counts.
+- How to test OLS residuals for spatial autocorrelation.
+- What Geographically Weighted Regression (GWR) is, and how to judge
+  whether it is actually an improvement.
+
 ```{r setup-m4}
 #| include: false
 library(sf)
@@ -25,15 +36,29 @@ data(africa_shp, package = "mlspatial")
 data(panc_incidence, package = "mlspatial")
 africa_health <- join_data(
   africa_shp |> mutate(
-    across(c(NAME, COUNTRYAFF),
-           ~ replace_values(.x, "Côte d'Ivoire" ~ "Cote d'Ivoire"))),
+    NAME       = gsub("Côte d'Ivoire", "Cote d'Ivoire", NAME),
+    COUNTRYAFF = gsub("Côte d'Ivoire", "Cote d'Ivoire", COUNTRYAFF)
+  ),
   panc_incidence, by = "NAME"
-  )
+)
 africa_health <- st_make_valid(africa_health)
 
-nb <- poly2nb(africa_health, row.names = africa_health$NAME, queen = TRUE)
+nb <- poly2nb(africa_health, row.names = africa_health$NAME,
+              queen = TRUE, snap = 1000)
 lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
 ```
+
+::: callout-note
+## Where this module sits
+
+Modules 2 and 3 mapped the disease and measured its spatial clustering.
+Here we ask a causal question: *which factors drive the disease rate?*
+Ordinary regression assumes each observation is independent, but Module
+3 showed spatial data can violate that. The workflow below is the
+standard spatial-epidemiology sequence: fit a global model, check its
+residuals for spatial structure, and only then reach for a local (GWR)
+model if the data justify it.
+:::
 
 ------------------------------------------------------------------------
 
@@ -41,14 +66,14 @@ lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
 
 **Purpose:** Link health outcomes to known epidemiological risk factors
 for pancreatic cancer (smoking, obesity, diabetes, alcohol use, family
-history urbanisation) for use in spatial regression exercise
+history, urbanisation) for use in the spatial regression exercise.
 
 For this tutorial, we **simulate** six covariates directly at the
 country level so the code is fully runnable without downloading external
 datasets. Because `africa_health` is a polygon layer where each row
-already represents one country (like `incidence`, `TOTPOP` etc), we do
-not need a raster data - we can generate one random value per row and
-append it directly with `mutate()`
+already represents one country (like `incidence`, `TOTPOP`, etc.), we do
+not need raster data — we can generate one random value per row and
+append it directly with `mutate()`.
 
 **In real research**, replace these random draws with actual
 country-level estimates from sources such as the WHO Global Health
@@ -95,17 +120,28 @@ head(africa_health[c("NAME", "smoking_prev", "obesity_prev",
                      "family_history_prev", "urbanization_pct")])
 ```
 
+::: callout-note
+## Why we simulate (and why that matters for interpretation)
+
+- `set.seed(898)` fixes the random-number generator so the "random"
+  covariates are the same every time the document is rendered —
+  essential for a reproducible tutorial.
+- `runif(n, min, max)` draws `n` values from a uniform distribution
+  between `min` and `max`, one per country. `round(..., 1)` keeps them
+  to one decimal place.
+- These covariates are simulated **independently of `incidence` and of
+  each other** — they are *not* designed to correlate with pancreatic
+  cancer rates. This is intentional: the goal is to demonstrate the
+  regression *pipeline* (data structure, model syntax, diagnostics), not
+  to produce a real epidemiological finding. As you will see, this
+  choice turns out to be a useful teaching device.
+:::
+
 **Key parameters:** - `runif(n, min, max)`: draws `n` random values from
 a uniform distribution bounded to a realistic range for each covariate,
 loosely based on published prevalence ranges across African countries.
 
-These covariates are simulated **independently of `incidence` and of
-each other** — they are not designed to correlate with pancreatic cancer
-rates. This is intentional: the goal is to demonstrate the spatial
-regression *pipeline* (data structure, model syntax, diagnostics), not
-to produce a real epidemiological finding.
-
-**Expected output:** Six new columns appended to `africa_health`
+**Expected output:** Six new columns appended to `africa_health`:
 
 | Column | Description | Simulated range |
 |------------------------|------------------------|------------------------|
@@ -134,6 +170,24 @@ ols_model <- lm(
 summary(ols_model)
 ```
 
+::: callout-note
+## Reading an `lm()` summary
+
+The formula `response ~ predictor1 + predictor2 + ...` tells `lm()` what
+to fit. The `summary()` then reports, for each predictor:
+
+- **Estimate** — the expected change in the outcome for a one-unit
+  increase in that predictor, holding the others fixed.
+- **Std. Error / t value / Pr(\>\|t\|)** — how precisely the coefficient
+  is estimated and whether it differs from zero.
+- **R-squared** — the proportion of variance in the outcome explained by
+  the model (0 to 1).
+- **F-statistic** — an overall test that at least one predictor matters.
+
+A positive coefficient means higher predictor → higher expected
+incidence; negative means the reverse.
+:::
+
 **Key parameters:** - Formula syntax:
 `response ~ predictor1 + predictor2 + ...` - Interpretation: Positive
 coefficients indicate higher expected incidence with higher predictor
@@ -143,21 +197,26 @@ values.
 standard errors, t-values, and p-values. R² indicates the proportion of
 variance explained globally.
 
-This model prints a warning message. The $R^2$ value is exactly **1**
-which creates room for concern. This is not a real spatial regression
-breakthrough, it is a classic case of data leakage through an identity
-relationship. Hence the perfect fit is a red flag not a good sign.
+::: callout-warning
+## A red flag: a *perfect* fit
+
+This first model prints a warning message and returns an $R^2$ of
+exactly **1** with an astronomical F-statistic. That is not a
+spatial-regression breakthrough — it is a classic case of **data
+leakage**. A model that fits perfectly is almost always telling you that
+the outcome is mathematically derived from one or more of its own
+predictors. The next section diagnoses it.
+:::
 
 ------------------------------------------------------------------------
 
 ## Diagnosing Data Leakage {#sec-diagnose}
 
-The first **ols** model returned `R-squared: 1`, an F-statistic of
-`2.36e+31` and an explicit warning -
-`essentialperfect fit: summary may be unreliable`. A model that fits
-perfectly is almost always telling you that the outcome is
-mathematically derived from one or more of its own predictors. This is
-called **data leakage**
+The first **OLS** model returned `R-squared: 1`, an F-statistic of
+`2.36e+31` and an explicit warning — *"essentially perfect fit: summary
+may be unreliable"*. A model that fits perfectly is almost always
+telling you that the outcome is mathematically derived from one or more
+of its own predictors. This is called **data leakage**.
 
 **Step 1: Inspect the coefficients.** Looking at the model summary, two
 variables stood out immediately:
@@ -167,34 +226,34 @@ female   9.302e-02   t = 1.005e+13   p < 2e-16
 male     9.302e-02   t = 1.003e+13   p < 2e-16
 ```
 
-Both coefficients are identical to four decimal figures, with t-value
+Both coefficients are identical to four decimal figures, with t-values
 around $10^{13}$. T-values that enormous are a signature of the model
-detecting an algebraic identity not a strong effect.
+detecting an algebraic identity, not a strong effect.
 
-**Step 2: Test the suspected Identity directly**
+**Step 2: Test the suspected identity directly.**
 
 ```{r test-suspect}
 cor(africa_health$incidence, africa_health$female + africa_health$male)
 head(africa_health$incidence / (africa_health$female + africa_health$male))
 ```
 
-A correlation of 1 between `incidence` and gender confirms that
+A correlation of 1 between `incidence` and `female + male` confirms that
 `incidence` is a fixed linear function of `female + male`. Dividing one
-by the other reveals the exact relationship. Every single country
+by the other reveals the exact relationship: every single country
 returns the exact constant `0.09302326`, meaning `incidence` was
 computed directly from `male` and `female` (or they share a common
-upstream calculation)
+upstream calculation).
 
 Including `male` and `female` as predictors makes it **mathematically
-circular**, the model is not learning but rather reversing an arithmetic
-formula.
+circular** — the model is not learning but rather reversing an
+arithmetic formula.
 
-**Step 3: Screen every numeric variable for leakage**
+**Step 3: Screen every numeric variable for leakage.**
 
 ```{r check-cor}
 # Check all numeric columns systematically against incidence
 numeric_cols <- africa_health |> 
-  st_drop_geometry() |>                    # drop geometry — not numeric
+  st_drop_geometry() |>                    
   select(where(is.numeric)) |> 
   select(-incidence) |>                    # exclude the outcome itself
   names()
@@ -204,11 +263,28 @@ cor_check <- sapply(numeric_cols, function(col) {
 })
 
 sort(abs(cor_check), decreasing = TRUE)
-
 ```
 
+::: callout-note
+## What "data leakage" means and how we caught it
+
+- **Data leakage** occurs when information from the outcome (or its
+  future) is used to *build* the predictors. The model then appears
+  brilliant but has learned nothing — it is just recovering an identity.
+- Step 1 spotted the tell-tale signs: identical coefficients and
+  implausibly large t-values.
+- Step 2 confirmed it: `cor()` returned exactly 1, and the ratio
+  `incidence / (female + male)` was a constant for every country.
+- Step 3 generalised the search. `st_drop_geometry()` removes the
+  spatial column (which is not numeric); `select(where(is.numeric))`
+  keeps only numeric columns; `select(-incidence)` drops the outcome;
+  then `sapply()` computes the correlation of each remaining column with
+  `incidence`. Sorting by absolute value surfaces every leaked variable
+  at once.
+:::
+
 The output shows the leakage extends well beyond `female`/`male`. Almost
-every variable with `|r|>0.85` shares a consistent naming pattern:
+every variable with `|r| > 0.85` shares a consistent naming pattern:
 age-banded (`age*`), year-indexed (`yr*`) and male/female-stratified
 (`m*`/`f*`). This strongly indicates they are all components of the same
 underlying case-count calculation that produced `incidence`.
@@ -218,18 +294,18 @@ underlying case-count calculation that produced `incidence`.
 ## Refined Model {#sec-ols-refine}
 
 Based on the correlation screen, we exclude every variable structurally
-tied to incidence calculation along with the non-informative row
+tied to the incidence calculation along with the non-informative row
 identifier. In their place we retain our six simulated risk-factor
 covariates.
 
 Another thing worth mentioning in epidemiology is the raw incidence
 counts. We rarely run models on raw count data. Instead we will
-calculate an **incidence rate** (e.g cases per 100,000 people) before
+calculate an **incidence rate** (e.g. cases per 100,000 people) before
 modelling.
 
 ```{r refined-ols}
 africa_health <- africa_health |> 
-  mutate(incidence_rate = (incidence/TOTPOP)*100000)
+  mutate(incidence_rate = (incidence / TOTPOP) * 100000)
 
 ols_refined <- lm(
   incidence_rate ~ smoking_prev + obesity_prev + diabetes_prev + 
@@ -239,6 +315,24 @@ ols_refined <- lm(
 summary(ols_refined)
 ```
 
+::: callout-note
+## Rates vs counts
+
+Raw case counts are dominated by population size: a big country has more
+cases almost by definition. Dividing by population —
+`(incidence / TOTPOP) * 100000` — standardises the outcome to "cases per
+100,000 people", making countries comparable. This is the same reasoning
+behind the age-standardised rates used in published cancer statistics.
+
+With the leaked columns removed, this refined model has an $R^2$ near
+0.15 and no significant predictors. Because the covariates were pure
+random noise, OLS did exactly what it should: it found **no** real
+relationship. The two variables that show marginal significance
+(`obesity_prev`, `urbanization_pct`) are chance findings — their signs
+are even biologically backwards (negative), which is what random noise
+looks like.
+:::
+
 This output provides an overall statistically insignificant model.
 Because the simulated covariates were generated purely as random noise
 (`runif`), the OLS model did exactly what it is supposed to do. It shows
@@ -247,7 +341,7 @@ variable.
 
 Although all the covariates are randomly generated, `obesity_prev` and
 `urbanization_pct` are showing marginal significance. This is purely by
-chance because we can confirm from their estimate direction (`-0.103`
+chance, because we can confirm from their estimate direction (`-0.103`
 and `-0.041`) that the math contradicts the biology; higher obesity and
 urbanisation should increase pancreatic cancer risk.
 
@@ -261,8 +355,8 @@ randomly distributed. If significant autocorrelation remains, OLS
 standard errors are biased and a spatial model (or GWR) is needed.
 
 In spatial epidemiology, if our model is missing a key geographical
-variable, the model's error will cluster together geographically. This
-is called **Spatial Autocorrelation of Residuals**
+variable, the model's errors will cluster together geographically. This
+is called **spatial autocorrelation of residuals**.
 
 ```{r moran-residuals}
 residual_moran <- lm.morantest(
@@ -273,19 +367,68 @@ residual_moran <- lm.morantest(
 print(residual_moran)
 ```
 
+::: callout-note
+## The zero-neighbour warning, and what `zero.policy = TRUE` does
+
+Six of the 54 units are islands that share no border with any other unit
+in the layer: `Cabo Verde`, `Comoros`, `Sao Tome and Principe`,
+`Madagascar`, `Mauritius` and `Seychelles`. `poly2nb()` warns about this
+and reports 7 sub-graphs — the connected mainland block of 48, plus the
+six islands. The warning is expected: these are genuine islands
+
+A unit with no neighbours has an undefined spatial lag, so `spdep` has
+to be told what to do with those rows. `zero.policy = TRUE` keeps them
+in the analysis and sets their lag to `0`. Setting it to `FALSE` fails
+instead, and not always in the same way: `nb2listw()` stops with an
+`Empty neighbour sets found` error, `moran.test()` stops with a
+`regions with no neighbours found` error, and `lm.morantest()`
+quietly returns `NA`. That is why the weights object and every test
+in this module pass `zero.policy = TRUE`.
+
+The islands still enter the statistic through their own residuals, but
+they appear in no other unit's neighbour list. They add nothing to the
+numerator of Moran's I, yet still count in the denominator (the sum of
+squared deviations), so keeping them in pulls I slightly towards zero.
+:::
+
+::: callout-note
+## Why test the residuals, not the outcome
+
+The **residual** for each country is the part of its rate the model
+*could not* explain: `residual = observed − fitted`. If those leftovers
+are spatially clustered (nearby countries share similar errors), the
+model is missing a spatially structured cause, and its p-values are
+unreliable.
+
+`lm.morantest()` applies Moran's I (from Module 3) to the residuals
+instead of the raw outcome. The null hypothesis is that the residuals
+are randomly distributed across space.
+:::
+
 **Key parameters:** - `lm.morantest()`: Applies Moran's I to the
 regression residuals rather than the raw outcome.
 
 **Expected output:** - If p \< 0.05, residuals are spatially
-autocorrelated → OLS is misspecified, therefore a spatial model (like
-GWR) is required. - If p \> 0.05, OLS residuals are spatially random
-(rare in epidemiology).
+autocorrelated, so OLS is likely misspecified and a spatial model (like
+GWR) is worth trying — but whether it actually helps is settled by
+comparing AICc (see below), not by the test alone. - If p \> 0.05, the
+residuals are not *significantly* autocorrelated — but a p-value close
+to 0.05 (say 0.06) signals weak, inconclusive spatial structure, not
+genuinely random residuals.
 
-The Null hypothesis for this test is that the residuals are randomly
-distributed (no spatial autocorrelation). Because our p-vale is high, we
-conclude that the errors in the model are randomly distributed across
-the African continent. There is no statistically significant spatial
-autocorrelation in the residuals.
+Here the observed Moran's I of the residuals is **+0.126** against an
+expectation of **−0.024**, with a p-value of **0.065**. That p-value is
+one-sided (`alternative hypothesis: greater`): it tests whether the
+residuals are *more* clustered than chance, not whether they differ from
+chance in either direction.
+
+At the 5% level we do **not** reject the null hypothesis, so the
+residuals are not *significantly* spatially autocorrelated. But 0.065 is
+a borderline result rather than a comfortable one: the observed I is
+positive — nearby countries do share similar errors — and it misses the
+conventional threshold only narrowly. The defensible reading is “weak,
+inconclusive spatial structure in the residuals”, not “residuals are
+spatially random”.
 
 ------------------------------------------------------------------------
 
@@ -294,6 +437,10 @@ autocorrelation in the residuals.
 **Purpose:** Fit local regression models that allow the relationship
 between cancer and lifestyle/genetic risk factors to vary across space
 (spatial non-stationarity).
+
+Ordinary regression fits **one** equation for the whole continent. GWR
+fits a separate weighted regression at every location, giving nearby
+points more influence, so each country gets its own set of coefficients.
 
 ```{r gwr-model}
 # Step 1: Find optimal adaptive bandwidth (number of nearest neighbours)
@@ -305,7 +452,7 @@ bw_adapt <- bw.gwr(
   data = africa_health,
   approach = "CV",     # Cross-validation approach
   kernel = "bisquare", # the shape of the spatial weight decay
-  adaptive = TRUE      # TRUE=find optimal no. of neigbours. FALSE = find distance
+  adaptive = TRUE      # TRUE = find optimal no. of neighbours. FALSE = find distance
 )
 cat("Optimal adaptive bandwidth:", bw_adapt, "neighbors\n")
 
@@ -317,12 +464,29 @@ gwr_model <- gwr.basic(
   data = africa_health,
   bw = bw_adapt,
   kernel = "bisquare",
-  adaptive = TRUE,
+  adaptive = TRUE
 )
 
 # Print summary (includes global OLS + local GWR diagnostics)
 print(gwr_model)
 ```
+
+::: callout-note
+## How GWR works, step by step
+
+- **Bandwidth** is the size of the local "window". `bw.gwr()` searches
+  over bandwidths and picks the one that minimises cross-validation
+  error (`approach = "CV"`). With `adaptive = TRUE`, the bandwidth is a
+  *number of nearest neighbours* (35 here) rather than a distance — the
+  right choice for irregularly sized countries.
+- **Kernel** is the weighting function. `"bisquare"` gives full weight
+  to near neighbours and drops smoothly to zero at the edge of the
+  window, creating clean local windows. (`"gaussian"` is the other
+  common choice; it never quite reaches zero.)
+- `gwr.basic()` then fits a weighted OLS at every polygon centroid. The
+  result is one coefficient per predictor **per country** — hence the
+  coefficients are reported as ranges.
+:::
 
 **Key parameters:** - `bw.gwr()`: `adaptive = TRUE` finds a bandwidth in
 number of neighbours rather than distance units. Better for irregularly
@@ -330,26 +494,60 @@ sized polygons. - `kernel = "bisquare"`: Weights drop to zero beyond the
 bandwidth, creating clean local windows. - `gwr.basic()`: Fits a
 separate weighted OLS at every polygon centroid.
 
-**Expected output:** - Bandwidth value (gave 35 neighbours for
-country-level Africa data). - GWR diagnostics showing local R²,
-coefficient ranges, and AICc values vs global OLS.
+**Expected output:** - Bandwidth value (35 neighbours for country-level
+Africa data). - GWR diagnostics showing local R², coefficient ranges,
+and AICc values vs global OLS.
+
+::: callout-note
+## Judging whether GWR is worth it
+
+A bandwidth of 35 is huge for a study area of only 54 countries — the
+model must look at over half the continent to make a single local
+prediction. The coefficient range for `diabetes_prev` spans roughly
+−0.64 to +0.23, suggesting the relationship *appears* to flip sign in
+places. But this is simulated noise, so the model is chasing nothing.
+
+The honest way to judge GWR is **AICc** (lower is better), not $R^2$ —
+GWR almost always inflates $R^2$ because it fits many more parameters.
+Here the AICc *rose* from 276.4 for OLS to 294.7 for GWR. The local
+model does not earn back the parameters it spends, so on this evidence
+it is the worse model — a useful negative result.
+
+The residual Moran test is only weak corroboration here (I = 0.126,
+p = 0.065), and its verdict is specific to this covariate set — see
+below.
+:::
 
 A bandwidth of 35 is huge for a spatial region of 54 countries. The
 model is forced to look at over half a continent to make a single
 prediction. The GWR coefficient estimates are given as a range because
-it changes depending on where you are on the map. In the global OLS the
-relationship for `diabetes_pev` is negative but GWR reveals that it
-changes in some part of the continent (`min:-0.543` and `max:0.225`).
-This shows the relationship is unstable across space (But remember this
-is simulated data so the model is just chasing random noise).
+they change depending on where you are on the map. In the global OLS the
+relationship for `diabetes_prev` is negative, but GWR reveals that it
+changes in some part of the continent (min ≈ −0.64 and max ≈ 0.23). This
+shows the relationship is unstable across space (but remember this is
+simulated data, so the model is just chasing random noise).
 
 The GWR $R^2$ looks very high but that should not be the metric of
-interest because it is almost always high for GWR analysis. The
-parameter of interest is the AICc (Lower is better). Even the the GWR
-artificially inflated the $R^2$, the AICc actually went up from 276.4 in
-the OLS to 294.7, this tells us that the GWR model is statistically
-worse. The OLS errors were randomly distributed and so the GWR was
-completely unnecessary.
+interest, because it is almost always high for GWR. The parameter of
+interest is the AICc (lower is better). Even though the GWR artificially
+inflated the $R^2$, the AICc went up from 276.4 in the OLS to 294.7 —
+the GWR is the worse model once you account for the number of parameters
+it spends.
+
+Keep the scope of that verdict in mind. It is a statement about *this*
+six-covariate specification, not a general finding that spatial
+regression is unnecessary. Two things narrow it. First, the covariates
+were simulated at random, so there is no spatially varying relationship
+for GWR to recover — the local model can only chase noise. Second, the
+residual evidence is borderline rather than clean: the global model
+leaves I = 0.126 (p = 0.065), which fails to reach significance but is
+not the comfortable “no clustering at all” result that would make GWR
+moot. Change the covariate set and the balance can shift the other way —
+the two-covariate model in the exercise below leaves much stronger
+residual clustering (I = 0.217, p = 0.007), which is precisely the
+situation GWR is designed for. The practical lesson is to let the AICc
+decide for each specification instead of assuming that a residual test
+has ruled spatial models out in advance.
 
 ------------------------------------------------------------------------
 
@@ -367,8 +565,8 @@ tm_shape(gwr_sf) +
   tm_polygons(
     fill = "diabetes_prev",
     fill.scale = tm_scale_continuous(
-      values = "-brewer.rd_bu",     # Negative RdBu puts red at positive and Blue at negative
-      midpoint = 0          # Forces the white/neutral color to sit exactly at zero
+      values = "-brewer.rd_bu",     # Negative RdBu puts red at positive and blue at negative
+      midpoint = 0                  # Forces the white/neutral colour to sit exactly at zero
     ),
     fill.legend = tm_legend(title = "Local Coefficient\n(Diabetes)"),
     col = 'black',
@@ -389,34 +587,129 @@ tm_shape(gwr_sf) +
     lwd = 0.5
   ) +
   tm_title("GWR: Local Model Performance across Africa")
-
 ```
+
+::: callout-note
+## Reading the coefficient maps
+
+- `gwr_model$SDF` is the spatial data frame of local results, with one
+  row per country and a column for each local coefficient plus
+  `Local_R2`.
+- `values = "-brewer.rd_bu"` selects a red–blue *diverging* palette (the
+  `-` reverses it so red = positive). `midpoint = 0` pins the neutral
+  colour at zero, so red countries have a positive local coefficient and
+  blue ones a negative one — the sign is instantly readable.
+- The second map shows `Local_R2`, the model's fit at each location,
+  using a sequential viridis palette.
+:::
 
 **Key parameters:** - `midpoint = 0` in
 `fill.scale = tm_scale_continuous()` centers the colour scale at zero,
 making positive (red) and negative (blue) effects immediately visible.
 
-**Expected output:** Two maps; one showing spatially varying coefficient
-`diabetes_prev` and the other showing the the area where the GWR model
-performs best (`Local R2`). Areas with red indicate a positive local
-association; blue indicates a negative local association for the
-`diabetes_prev` .
+**Expected output:** Two maps; one showing the spatially varying
+coefficient `diabetes_prev` and the other showing where the GWR model
+performs best (`Local_R2`). Red indicates a positive local association;
+blue indicates a negative local association for `diabetes_prev`.
 
 The spatial variation map shows smooth colour transitions across
-borders. Whiles this creates a beautiful map, remember our **AICc**
+borders. While this creates a beautiful map, remember our **AICc**
 score. Because the underlying data is purely random noise, this map is
-just a visualisation of the GWR algorithm 'forcing' a spatial pattern
+just a visualisation of the GWR algorithm "forcing" a spatial pattern
 where none actually exists.
+
+------------------------------------------------------------------------
+
+## Practical Exercise {#sec-m4-exercise}
+
+Reinforce the workflow with a few tasks, then check your answers against
+the solution.
+
+1.  Confirm the data leakage: compute
+    `cor(africa_health$incidence, africa_health$female + africa_health$male)`
+    and report the value.
+2.  Create the `incidence_rate` variable and fit an OLS model using only
+    `smoking_prev` and `obesity_prev`. Report the $R^2$.
+3.  Run `lm.morantest()` on that model's residuals. Is there significant
+    spatial autocorrelation?
+4.  *(Challenge)* Re-run `bw.gwr()` with `kernel = "gaussian"` (keeping
+    the other settings) and report the optimal bandwidth and whether the
+    GWR AICc improved relative to the `"bisquare"` model above.
+
+::: {.callout-note collapse="true"}
+## Model solution
+
+``` r
+library(sf)
+library(spdep)
+library(GWmodel)
+library(dplyr)
+library(mlspatial)
+
+data(africa_shp, package = "mlspatial")
+data(panc_incidence, package = "mlspatial")
+africa_health <- join_data(
+  africa_shp |> mutate(NAME = gsub("Côte d'Ivoire", "Cote d'Ivoire", NAME)),
+  panc_incidence, by = "NAME"
+)
+africa_health <- st_make_valid(africa_health)
+
+nb <- poly2nb(africa_health, row.names = africa_health$NAME,
+              queen = TRUE, snap = 1000)
+lw <- nb2listw(nb, style = "W", zero.policy = TRUE)
+
+set.seed(898)
+n <- nrow(africa_health)
+africa_health <- africa_health |>
+  mutate(
+    smoking_prev = round(runif(n, 8, 28), 1),
+    obesity_prev = round(runif(n, 5, 30), 1),
+    diabetes_prev = round(runif(n, 2, 11), 1),
+    alcohol_per_capita = round(runif(n, 0.5, 12), 1),
+    family_history_prev = round(runif(n, 3, 10), 1),
+    urbanization_pct = round(runif(n, 15, 85), 1),
+    incidence_rate = (incidence / TOTPOP) * 100000
+  )
+
+# 1. Confirm the leakage
+cor(africa_health$incidence, africa_health$female + africa_health$male)
+# -> exactly 1
+
+# 2. OLS with two covariates
+ols2 <- lm(incidence_rate ~ smoking_prev + obesity_prev, data = africa_health)
+summary(ols2)$r.squared
+
+# 3. Residual autocorrelation
+lm.morantest(ols2, listw = lw, zero.policy = TRUE)
+# -> I = 0.217, p = 0.007: with only two covariates the residuals ARE
+#    significantly clustered - a weakly fitting global model leaves
+#    spatial structure behind
+
+# 4. Gaussian kernel bandwidth + AICc
+f <- incidence_rate ~ smoking_prev + obesity_prev + diabetes_prev +
+  alcohol_per_capita + family_history_prev + urbanization_pct
+bw_gauss <- bw.gwr(f, data = africa_health, approach = "CV",
+                   kernel = "gaussian", adaptive = TRUE)
+gwr_gauss <- gwr.basic(f, data = africa_health, bw = bw_gauss,
+                       kernel = "gaussian", adaptive = TRUE)
+gwr_gauss$GW.diagnostic$AICc
+# -> bandwidth 24, AICc = 279.7: this beats the bisquare GWR (294.7)
+#    but is still above the six-covariate OLS AICc of 276.4, so the
+#    Gaussian kernel narrows the gap without changing the verdict
+```
+:::
 
 ------------------------------------------------------------------------
 
 ## Module 4 Checklist {#sec-m4-check .unnumbered}
 
-- [ ] Extracted environmental covariates from raster data
+- [ ] Simulated risk-factor covariates
 - [ ] Built and interpreted an OLS regression model
+- [ ] Diagnosed data leakage from a perfect fit
 - [ ] Tested OLS residuals for spatial autocorrelation
 - [ ] Fitted a GWR model with adaptive bandwidth
 - [ ] Mapped local coefficient surfaces
+- [ ] Practical exercise completed
 
 **Next:** Proceed to [Module 5: Machine Learning for Spatial
 Epidemiology](05-ml.qmd).

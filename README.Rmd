@@ -27,9 +27,7 @@ MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.or
 
 ## A comprehensive, hands-on tutorial for public health researchers - Built entirely in R.
 
-This repository contains the complete source materials for the **Spatial
-Epidemiology in R** tutorial, developed for the **Ghana R User
-Community** in collaboration with **AfreDAC**. The tutorial teaches
+This repository contains the complete source materials for the **Introduction to Spatial Epidemiology for Health Research** tutorial, developed for the **AfreDAC team** in collaboration with **Ghana R Users Community**. The tutorial teaches
 spatial data import, disease mapping, spatial autocorrelation analysis,
 geographically weighted regression, and machine learning for spatial
 epidemiology — all without leaving the R environment.

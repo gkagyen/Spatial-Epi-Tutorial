@@ -4,12 +4,28 @@ editor:
     wrap: 72
 ---
 
-# R Environment Setup and Spatial Data Import {#sec-module1}
+# Module 1: R Environment Setup and Spatial Data Import {#sec-module1}
 
 This module establishes your R spatial epidemiology toolkit and teaches
 you how to import, join, and inspect spatial and health data. By the end
 of this module, you will have a clean `sf` object ready for mapping and
 analysis.
+
+**What you will learn**
+
+- How to install and load the packages this tutorial relies on.
+- What a *shapefile*, a *GeoPackage*, and a *raster* are, and how to
+  import all three into R using `sf` and `terra`.
+- Why the GeoPackage (`.gpkg`) format has largely replaced the legacy
+  shapefile (`.shp`).
+- How to preprocess (tidy) spatial data before analysis.
+- How to join a table of health outcomes to spatial boundaries.
+- How to inspect and manage the coordinate reference system (CRS).
+
+A short note on *why* setup matters: most frustrating spatial errors —
+maps that look blank, points plotted in the wrong ocean, joins that
+silently drop countries — happen *before* any modelling. This module
+builds good habits that will save you hours later.
 
 ```{r setup-m1}
 #| include: false
@@ -26,6 +42,16 @@ library(mlspatial)
 ## Install and Load R Packages {#sec-install}
 
 **Purpose:** Install and attach the core spatial epidemiology toolkit.
+
+A **package** is a collection of R functions and data bundled together.
+Two steps are always involved:
+
+1.  **Install** (once per machine): `install.packages()` downloads the
+    package from a repository (CRAN by default) and stores it on your
+    computer.
+2.  **Load** (every session): `library()` attaches the package so its
+    functions are available. You must re-load packages each time you
+    start a new R session.
 
 The table below shows the packages we will use throughout this tutorial
 and their roles:
@@ -57,6 +83,36 @@ install_if_missing <- function(p) {
 invisible(sapply(pkgs, install_if_missing))
 ```
 
+::: callout-note
+## How this code works
+
+The helper function avoids re-installing packages you already have:
+
+- `pkgs <- c(...)` creates a *character vector* of package names.
+- `install_if_missing <- function(p)` defines a function taking one
+  package name `p`.
+- `require(p, character.only = TRUE, quietly = TRUE)` tries to load the
+  package. It returns `TRUE` if the package is available and `FALSE` if
+  not — importantly, it does **not** stop with an error like `library()`
+  would.
+- `!require(...)` therefore means "the package is *not* available". When
+  that is true, we install it and then load it.
+- `character.only = TRUE` tells `require()`/`library()` to treat `p` as
+  a *value* (a string like `"sf"`) rather than as a literal name.
+  Without it, R would look for a package literally called `p`.
+- `sapply(pkgs, install_if_missing)` applies the function to every
+  element of `pkgs` in turn (a one-line loop).
+- `invisible()` hides the output of `sapply()`, keeping the console
+  tidy.
+
+You can run the same logic more manually for a single package:
+
+``` r
+install.packages("sf")
+library(sf)
+```
+:::
+
 ::: callout-tip
 ## Speed Tip
 
@@ -76,6 +132,7 @@ regions.
 
 We demonstrate two approaches: (a) built-in data from `mlspatial`
 (fastest for learning), and (b) `sf::st_read()` for your own shapefiles.
+The second approach is expanded in the next section.
 
 ```{r load-boundaries}
 # Approach A: Built-in Africa shapefile from mlspatial
@@ -89,12 +146,369 @@ dim(africa_shp)
 # ghana_regions <- sf::st_read("path/to/ghana_regions.shp")
 ```
 
-**Key parameters:** - `st_read()` arguments: `dsn` (data source name /
-folder path), `layer` (filename without .shp extension if inside a
-geodatabase). - `quiet = TRUE` suppresses progress messages.
+::: callout-note
+## Understanding the `sf` object
+
+`africa_shp` is an `sf` (simple features) object. It is essentially a
+normal **data frame** with one special extra column, `geometry`, that
+stores the spatial coordinates of each feature. This is why `class()`
+prints both `"sf"` and `"data.frame"`: you get all the familiar
+data-frame tools (filtering, summarising, joining) *plus* spatial tools.
+
+- Each **row** is one feature (here, one country).
+- Each **column** other than `geometry` is an *attribute* (e.g. country
+  name, population).
+- `dim()` returns 54 rows (54 African countries) and 9 columns, one of
+  which is `geometry`.
+:::
+
+**Key parameters of `st_read()`:** - `dsn` (data source name): the path
+to the file or folder containing the data — a local file, a directory, a
+zipped shapefile, or a URL. - `layer`: the layer name; needed whenever
+the source holds more than one layer (a GeoPackage, a File Geodatabase,
+or a folder of shapefiles). Supply it explicitly for `.gpkg` files. -
+`quiet = TRUE` suppresses progress messages.
 
 **Expected output:** `africa_shp` is an `sf` data frame with a
 `geometry` column and attribute columns (including `NAME`).
+
+------------------------------------------------------------------------
+
+## Importing Your Own Spatial Data {#sec-import-own}
+
+**Purpose:** Read an external shapefile, GeoPackage, or raster into R
+and prepare (tidy) them for analysis. This is the skill you need once
+you move from the bundled example data to your own project.
+
+### Two fundamental data models {.unnumbered}
+
+Spatial data comes in two flavours, and R uses a different package for
+each:
+
+| Model | What it stores | Package | Example |
+|------------------|------------------|------------------|------------------|
+| **Vector** | Discrete features as points, lines, or polygons (with attribute tables) | `sf` | Admin boundaries, health facilities, roads |
+| **Raster** | A continuous grid of cells (pixels), each holding a value | `terra` | Elevation, temperature, land cover, rainfall |
+
+A **shapefile** is a *vector* format. Despite the `.shp` extension, it
+is actually several files that must travel together — `.shp` (geometry),
+`.dbf` (attribute table), `.shx` (spatial index), and `.prj` (the CRS
+definition). If you move only the `.shp` file, the data will not open.
+
+A **GeoPackage** (`.gpkg`) is the modern container for the same kind of
+vector data: a *single* file, built on SQLite, that can hold several
+layers at once. It is covered in *Import a GeoPackage with `sf`* below.
+
+A **raster** file (commonly `.tif`/`.tiff`, from "GeoTIFF") is a grid of
+cells. Each cell covers a fixed area and holds a single value, which is
+why rasters are ideal for continuous surfaces such as elevation or
+climate.
+
+### Import a shapefile with `sf` {#sec-import-vector}
+
+We use a small shapefile that ships with the `terra` package (the 12
+cantons of Luxembourg). Replace the path with your own `.shp` file if
+you want to import your own data.
+
+```{r import-vector}
+# Get the path to a built-in example shapefile
+shp_path <- system.file("ex/lux.shp", package = "terra")
+shp_path
+
+# Read it into R as an sf object
+lux <- sf::st_read(shp_path, quiet = TRUE)
+
+# Quick look
+class(lux)
+nrow(lux)
+```
+
+::: callout-note
+## How `st_read()` works
+
+`st_read()` is the single most important function for vector data. Give
+it a file path and it returns an `sf` object, automatically reading the
+geometry, the attribute table, and the CRS from the accompanying files.
+
+- `dsn` is the path (here passed positionally as `shp_path`).
+- `quiet = TRUE` silences the layer/feature progress report.
+:::
+
+### Import a GeoPackage with `sf` {#sec-import-gpkg}
+
+A **GeoPackage** (`.gpkg`) is an open standard (OGC) container built on
+SQLite. It stores one or more spatial layers in a *single* file, so
+there are no sidecar files to lose. The `sf` package ships real
+GeoPackages in its `gpkg/` folder, so there is nothing to download: we
+use the 100 North Carolina counties in `nc.gpkg`. Conveniently, the
+identical dataset also ships as a shapefile, so we can compare the two
+formats on the same data.
+
+```{r import-gpkg}
+# Path to a GeoPackage that ships with sf (100 North Carolina counties)
+gpkg_path <- system.file("gpkg/nc.gpkg", package = "sf")
+basename(gpkg_path)
+
+# Inspect the container before reading: layers, geometry, features, CRS
+sf::st_layers(gpkg_path)
+
+# Read the layer into R as an sf object
+nc_gpkg <- sf::st_read(gpkg_path, quiet = TRUE)
+
+# The same dataset also ships as a shapefile...
+nc_shp <- sf::st_read(system.file("shape/nc.shp", package = "sf"), quiet = TRUE)
+
+# ...so the two formats can be compared directly
+class(nc_gpkg)
+dim(nc_gpkg)
+sf::st_crs(nc_gpkg)$epsg
+
+# The geometry column keeps whatever name the file itself declares
+names(nc_gpkg)[ncol(nc_gpkg)]   # "geom"
+names(nc_shp)[ncol(nc_shp)]     # "geometry"
+
+# The attribute tables are identical
+identical(
+  sf::st_drop_geometry(nc_gpkg)[order(nc_gpkg$FIPS), ],
+  sf::st_drop_geometry(nc_shp)[order(nc_shp$FIPS), ]
+)
+```
+
+Either way `st_read()` returns an `sf` object, so the choice of format
+changes how the data is stored, not how you analyse it.
+
+A GeoPackage can also hold layers with **no geometry at all** — it is a
+SQLite database first and a spatial format second.
+
+```{r import-gpkg-nospatial}
+# A geometry-free layer comes back as a plain data frame
+nosp <- sf::st_read(system.file("gpkg/nospatial.gpkg", package = "sf"), quiet = TRUE)
+class(nosp)
+```
+
+::: callout-note
+## How `st_layers()` and `st_read()` work with a GeoPackage
+
+- `system.file("gpkg/nc.gpkg", package = "sf")` builds the path to a
+  file inside the installed `sf` package. These examples live in
+  `gpkg/`, not the more usual `extdata/`, so the subfolder must be named
+  explicitly.
+- `st_layers()` queries the container and reports every layer with its
+  geometry type, feature count, field count, and CRS. Run it whenever
+  you receive an unfamiliar `.gpkg` — the file name tells you nothing
+  about how many layers are inside.
+- `st_read(gpkg_path)` returns an `sf` object. When a GeoPackage holds
+  more than one layer you must name the one you want with
+  `layer = "..."`; otherwise `st_read()` silently returns the *first*
+  layer, which may not be the one you intended.
+- `st_drop_geometry()` strips the geometry and returns a plain data
+  frame, which is why `identical()` can compare the two attribute tables
+  directly. The `order()` calls align the rows by `FIPS` first, because
+  the two files store them in a different order.
+- The geometry column is named by the file rather than hard-coded: this
+  GeoPackage layer calls it `geom`, whereas `st_read()` always names a
+  shapefile's geometry column `geometry`. Both are ordinary `sf`
+  objects.
+- Nothing here is GeoPackage-specific: `st_read()` delegates to GDAL, so
+  the same call reads `.gpkg`, `.shp`, `.geojson`, `.gdb`, and dozens of
+  other formats. Only `dsn` changes.
+:::
+
+::: callout-note
+## Why `.gpkg` is more modern than `.shp`
+
+The ESRI Shapefile dates from the early 1990s and carries known design
+limitations. A GeoPackage is a single, open, relational container that
+avoids most of them:
+
+| Feature | `.shp` (shapefile) | `.gpkg` (GeoPackage) |
+|------------------------|------------------------|------------------------|
+| Files on disk | A mandatory trio (`.shp`, `.shx`, `.dbf`) plus sidecars (`.prj`, `.cpg`, …) | One file |
+| Layers per file | One | Many |
+| Field name length | Truncated to 10 characters | Up to 255 characters |
+| Field types | Limited; no true dates, no 64-bit integers | Full SQLite type system |
+| Geometry types | One type per file | Mixable, multiple geometry columns |
+| Missing values | No true `NULL`; blank numerics often arrive as `0` | `NULL` distinct from `0` |
+| File size | 2 GB per component | No comparable practical ceiling |
+| Text encoding | Ambiguous, needs a `.cpg` file | UTF-8 by definition |
+| Keys and indexes | None | Primary keys, constraints, spatial indexes |
+| Standard | De facto (ESRI) | Open (OGC / SQLite) |
+
+Two of these bite spatial epidemiology directly. The **10-character
+field name limit** silently truncates columns: none of the `nc` fields
+are long enough to lose characters, but join keys and outcome names in
+your own data may be, and a truncated key drops records without warning.
+And with **no true `NULL`**, a genuinely missing incidence rate may be
+stored and read back as `0`, deflating rates and pulling maps toward
+zero. GeoPackage also keeps the CRS inside the file, so a stray `.prj`
+cannot be lost in transit, and one file is far easier to version,
+checksum, and share than five.
+
+In practice: use `.gpkg` for anything you control, but expect to meet
+`.shp` constantly in legacy data and in exports from older GIS software.
+`st_read()` handles both, so the mental cost of switching is one file
+path.
+:::
+
+::: callout-tip
+## Where to find more GeoPackage examples
+
+`sf` ships five more GeoPackages alongside `nc.gpkg`:
+
+``` r
+list.files(system.file("gpkg", package = "sf"))
+```
+
+They are handy for practice, and `b_pump.gpkg` is a small piece of
+history — a single point in Soho, London (longitude -0.1367, latitude
+51.5133) marking the Broad Street water pump whose removal ended John
+Snow's 1854 cholera outbreak and helped establish epidemiology as a
+discipline.
+
+When a data portal offers a choice, prefer `.gpkg`, then `.geojson`,
+then a zipped `.shp`. GeoJSON is also a single file and universally
+supported, but it is plain text, so it is much larger and slower than
+`.gpkg` for polygon layers. To convert a shapefile you already have,
+`sf::st_write(myshape, "out.gpkg")` is all it takes — no external GIS
+software required.
+:::
+
+### Inspect and tidy the vector data {#sec-tidy-vector}
+
+Before analysis, check the object's geometry type, CRS, and validity,
+and tidy up anything that will cause trouble later.
+
+```{r tidy-vector}
+# Geometry type and number of features
+sf::st_geometry_type(lux, by_geometry = FALSE)
+
+# Coordinate reference system (EPSG code)
+sf::st_crs(lux)
+
+# Are all geometries valid? (FALSE means some need fixing)
+all(sf::st_is_valid(lux))
+
+# Fix any invalid geometries
+lux <- sf::st_make_valid(lux)
+
+# Drop empty geometries (features with no coordinates)
+lux <- lux[!sf::st_is_empty(lux), ]
+
+# Tidy column names: lower-case, underscores instead of spaces
+names(lux) <- gsub("[[:space:]]+", "_", tolower(names(lux)))
+names(lux)
+
+# Keep only the columns you need (canton name and population)
+lux_sub <- lux[, c("name_2", "pop", "geometry")]
+head(lux_sub)
+```
+
+::: callout-note
+## What each step does
+
+- `st_geometry_type(..., by_geometry = FALSE)` reports the *single*
+  shared geometry type (e.g. `MULTIPOLYGON`) rather than one per row.
+- `st_crs()` shows the coordinate reference system (see the CRS section
+  below).
+- `st_is_valid()` checks each geometry for self-intersections and other
+  defects; `st_make_valid()` repairs them. Invalid geometries are a
+  common source of cryptic errors later.
+- `st_is_empty()` flags features with no coordinates; we remove them.
+- `gsub("[[:space:]]+", "_", tolower(names(lux)))` converts names like
+  `"NAME_2"` to `"name_2"` and replaces spaces with underscores, so they
+  are easier to type and safe to use in formulas.
+- Subsetting with `lux[, c("name_2", "pop", "geometry")]` keeps only
+  relevant columns (note `geometry` stays so it remains spatial).
+:::
+
+### Import a raster with `terra` {#sec-import-raster}
+
+We use a small digital elevation model (DEM) that ships with `terra`.
+Elevation is a common covariate in spatial epidemiology — for example,
+altitude influences temperature and the distribution of vector-borne
+diseases.
+
+```{r import-raster}
+# Path to a built-in example raster (a DEM)
+r_path <- system.file("ex/elev.tif", package = "terra")
+r_path
+
+# Read it into R as a SpatRaster
+elev <- terra::rast(r_path)
+
+# Inspect it
+elev
+terra::nlyr(elev)     # number of layers (bands)
+terra::res(elev)      # cell size in the x and y directions
+terra::ext(elev)      # spatial extent (bounding box)
+terra::crs(elev, describe = TRUE)$code  # EPSG code
+
+# Plot it
+plot(elev, main = "Elevation (m)")
+```
+
+::: callout-note
+## Understanding the raster print-out
+
+`terra::rast()` returns a `SpatRaster`. When you print it, you see:
+
+- **dimensions** — number of rows, columns, and layers. This example has
+  one layer (a single-band DEM); a multispectral satellite image might
+  have several.
+- **resolution** — the ground size of one cell (here ≈ 0.0083 degrees).
+- **extent** — the bounding box (xmin, xmax, ymin, ymax).
+- **crs** — the coordinate reference system.
+:::
+
+### Preprocess the raster {#sec-tidy-raster}
+
+Rasters from different sources rarely line up. The three most common
+preprocessing tasks are **reprojecting**, **cropping/masking**, and
+**resampling**.
+
+```{r tidy-raster}
+# Reproject the raster and polygons to a shared projected CRS (EPSG:3857)
+elev_web <- terra::project(elev, "EPSG:3857")
+lux_web <- sf::st_transform(lux_sub, crs = 3857)
+
+# Convert the sf polygons to a SpatVector so terra can use them
+lux_vect <- terra::vect(lux_web)
+
+# Crop to the extent of the polygons, then mask to their exact shape
+elev_lux <- terra::crop(elev_web, lux_vect)
+elev_lux <- terra::mask(elev_lux, lux_vect)
+
+plot(elev_lux, main = "Elevation clipped to Luxembourg")
+```
+
+::: callout-note
+## Why these three steps matter
+
+- `project()` changes the CRS of a raster; `st_transform()` does the
+  same for vector data. Layers must share a CRS before you can overlay
+  or stack them.
+- `crop()` trims the raster to a bounding box (fast); `mask()` then sets
+  cells *outside* the polygon to `NA`, giving the raster the exact shape
+  of your study area.
+- `vect()` converts an `sf` object into a `terra`-compatible
+  `SpatVector` (and `sf::st_as_sf()` converts back the other way).
+
+The `terra` package also provides `resample()` to align rasters that
+share a CRS but differ in resolution, which you will need when combining
+multiple raster layers.
+:::
+
+::: callout-tip
+## The `mlspatial` shortcuts
+
+`mlspatial` ships thin wrappers over these steps for convenience:
+`load_shapefile("path.shp")` (a wrapper around `st_read()`) and
+`load_incidence_data("path.xlsx")`. Because `load_shapefile()` passes
+the path straight through to `st_read()`, it reads a GeoPackage just as
+happily — `load_shapefile("path.gpkg")` returns the first layer. Under
+the hood these wrappers do exactly what we did above, so understanding
+the `sf`/`terra` functions first is important.
+:::
 
 ------------------------------------------------------------------------
 
@@ -112,13 +526,23 @@ str(panc_incidence)
 head(panc_incidence)
 ```
 
-**Key variables in `panc_incidence`:** - `NAME`: Country name (join
-key) - `incidence`: Age-standardized rate per 100,000 - `female`,
-`male`: Counts by sex - `agea`, `ageb`, `agec`: Age-stratum counts -
-`yra` … `yre`: Yearly incidence rates (2017–2021)
+::: callout-note
+## Reading `str()` and `head()`
 
-**Expected output:** A tibble with one row per country and columns for
-incidence, demographics, and age groups.
+- `str()` (structure) lists each column, its type, and the first few
+  values. Use it to confirm that columns you expect to be numeric really
+  are numeric, and to spot factor/character mix-ups.
+- `head()` shows the first six rows so you can sanity-check the values.
+:::
+
+**Key variables in `panc_incidence`:** - `NAME`: Country name (the join
+key) - `incidence`: Incidence rate per 100,000 population (as documented
+in `mlspatial`) - `female`, `male`: Counts by sex - `agea`, `ageb`,
+`agec`: Age-stratum values (below 20, 20–54, and above 55 years) - `yra`
+… `yre`: Yearly incidence rates (2017–2021)
+
+**Expected output:** A tibble with one row per country (54 rows) and 18
+columns.
 
 ------------------------------------------------------------------------
 
@@ -127,36 +551,56 @@ incidence, demographics, and age groups.
 **Purpose:** Attach disease attributes to the correct spatial polygons
 so we can map and model them.
 
+A join matches rows from two tables using a common **key** column. Here
+the key is the country name. Crucially, the spelling must match exactly
+— in our data the shapefile spells the country "Côte d'Ivoire" (with an
+accent), while the health table spells it "Cote d'Ivoire" (without).
+Without fixing this, the join would silently drop the country. We fix
+the name first.
+
 ```{r join-data}
+# Fix the one mismatched name so the join keys align
+africa_shp <- africa_shp |>
+  mutate(
+    NAME       = gsub("Côte d'Ivoire", "Cote d'Ivoire", NAME),
+    COUNTRYAFF = gsub("Côte d'Ivoire", "Cote d'Ivoire", COUNTRYAFF)
+  )
+
 # Method 1: mlspatial wrapper (recommended for consistency)
 africa_health <- mlspatial::join_data(
-  sf_data = africa_shp |> 
-    # change ivory coast name to match in both datasets
-    mutate(
-      across(c(NAME, COUNTRYAFF),
-             ~ replace_values(.x, "Côte d'Ivoire" ~ "Cote d'Ivoire")
-     )
-    ),
+  sf_data = africa_shp,
   tbl_data = panc_incidence,
   by = "NAME"
 )
 
 # Method 2: dplyr inner_join (identical result, more familiar syntax)
-# africa_health <- africa_shp |> 
+# africa_health <- africa_shp |>
 #   dplyr::inner_join(panc_incidence, by = "NAME")
 
 # Verify the join
 dim(africa_health)
 ```
 
-**Key parameters:** - `by`: Character name of the shared key column.
-Both tables **must** share identical spelling and casing. -
-`inner_join()` keeps only rows that match in both tables. Use
-`left_join()` if you want to keep all polygons even without health data.
+::: callout-note
+## How the code works
+
+- `gsub(pattern, replacement, x)` performs a **g**lobal
+  **sub**stitution: it replaces every occurrence of `"Côte d'Ivoire"`
+  with `"Cote d'Ivoire"` in the `NAME` column. We do the same for
+  `COUNTRYAFF` so every name column is consistent.
+- `mutate()` (from `dplyr`) creates or overwrites columns.
+- `join_data()` is an `mlspatial` convenience wrapper; inspecting its
+  source shows it simply calls `dplyr::inner_join()`.
+- `by = "NAME"` tells R which column is the shared key. Both tables
+  **must** use identical spelling and casing.
+- `inner_join()` keeps only rows that match in both tables. Use
+  `left_join()` if you want to keep all polygons even those without
+  health data (unmatched rows get `NA`).
+:::
 
 **Expected output:** An `sf` object with the same number of rows as the
-original shapefile (or fewer if using `inner_join` and some names do not
-match) and all columns from both datasets.
+original shapefile (54, because every country matched) and all columns
+from both datasets.
 
 ------------------------------------------------------------------------
 
@@ -179,9 +623,21 @@ summary(africa_health$incidence)
 sum(is.na(africa_health$incidence))
 ```
 
+::: callout-note
+## Reading the output
+
+- `str()` should show a `Classes 'sf' ...` object with a `geometry`
+  column of type `MULTIPOLYGON`.
+- `summary()` gives the five-number summary plus the mean for a numeric
+  column. `incidence` is numeric and ranges from about 1.8 to 4950.9,
+  with a median near 185.
+- `sum(is.na(...))` counts missing values. `0` means every country has a
+  recorded incidence, so no imputation is needed here.
+:::
+
 **Expected output:** - `str()` shows a `Classes 'sf' ...` object with a
 `geometry` column of type `MULTIPOLYGON`. - `incidence` is numeric with
-a range roughly between 0.5 and 8.0 (rates per 100,000).
+a range of roughly 1.8 to 4900 and no missing values.
 
 ------------------------------------------------------------------------
 
@@ -190,6 +646,12 @@ a range roughly between 0.5 and 8.0 (rates per 100,000).
 **Purpose:** Ensure all spatial layers share the same projection.
 Mismatched CRS is the most common source of silent errors in spatial
 analysis.
+
+A **coordinate reference system** defines how the flat coordinates in
+your data relate to locations on the Earth. It has two parts: a
+**datum** (a model of the Earth's shape) and a **projection** (how the
+curved Earth is flattened onto a map). CRSs are identified by **EPSG
+codes** (e.g. `4326`, `3857`).
 
 ```{r crs-management}
 # View current CRS
@@ -201,17 +663,119 @@ sf::st_is_longlat(africa_health)
 # If you need to transform to a projected CRS for distance calculations
 # Example: Africa Albers Equal Area Conic (EPSG: 102022)
 # africa_projected <- sf::st_transform(africa_health, crs = 102022)
-
-# For this tutorial we keep WGS84/Pseudo-Mercator (EPSG:3857) because tmap 
-# handle it well for visualisation, but we note that distance calculations may
-# be distorted due to projection limitations.
 ```
 
-**Key concepts:** - **EPSG:3857** (WGS84/Pseudo-Mercator): Web mapping projection in meters. Good for visualisation and web mapping, but distances are distorted especially away from the equator. Not recommended for accurate distance calculations - **Projected
-CRS** (e.g., UTM zones, Albers, Pseudo-Mercator): Distances in meters. Essential for
-buffers, distances, and GWR bandwidth selection. However Pseudo-Mercartor distorts areas and distances significantly.
+::: callout-note
+## Geographic vs projected CRS
 
-**Expected output:** `st_crs()` returns the CRS definition, shows EPSG:3857 (WGS 84/Pseudo-Mercator).`st_is_longlat()` returns `FALSE` because this is a projected CRS (Units in meters), not geographic degrees.
+- **Geographic** CRSs (e.g. EPSG:4326, WGS 84) use degrees of
+  latitude/longitude. `st_is_longlat()` returns `TRUE` for these.
+  Degrees are *not* a consistent unit of distance (a degree of longitude
+  shrinks toward the poles), so they are unsuitable for measuring
+  distances or areas.
+- **Projected** CRSs (e.g. EPSG:3857, or UTM zones) use metres on a flat
+  surface. Distances and areas are meaningful, but every projection
+  distorts *something* (shape, area, or distance).
+- `st_transform()` converts between CRSs. It changes the stored
+  coordinates but not the underlying data.
+:::
+
+**Key concepts:** - **EPSG:3857** (WGS 84 / Pseudo-Mercator): a web
+mapping projection in metres, used by Google Maps and OpenStreetMap. It
+is convenient for visualisation but distorts areas and distances, which
+worsens away from the equator. - **Projected CRS** (e.g. UTM zones,
+Albers Equal Area): distances in metres, with distortion controlled for
+a specific region. Essential for buffers, distances, and GWR bandwidth
+selection.
+
+For this tutorial we keep EPSG:3857 because `tmap` handles it well for
+visualisation, but we note that distance calculations may be distorted.
+
+**Expected output:** `st_crs()` returns the CRS definition (EPSG:3857,
+WGS 84 / Pseudo-Mercator). `st_is_longlat()` returns `FALSE` because
+this is a projected CRS with units in metres, not geographic degrees.
+
+------------------------------------------------------------------------
+
+## Practical Exercise {#sec-m1-exercise}
+
+Now apply what you have learned. Work through the tasks below, then
+check your answers against the solution.
+
+1.  Load `africa_shp` and report its class, dimensions, geometry type,
+    and CRS code.
+2.  Import the bundled Luxembourg shapefile
+    (`system.file("ex/lux.shp", package = "terra")`). How many cantons
+    does it contain, and what geometry type does it use?
+3.  Import the bundled elevation raster
+    (`system.file("ex/elev.tif", package = "terra")`) and report its
+    resolution, extent, and CRS code.
+4.  Re-project that raster (in Q3) to EPSG:3857 and confirm the new CRS.
+5.  Recreate the country join yourself using `inner_join()` (without
+    `mlspatial::join_data()`), remembering to fix the "Côte d'Ivoire"
+    spelling first. How many rows does the result have?
+6.  Read the GeoPackage that ships with `sf`
+    (`system.file("gpkg/nc.gpkg", package = "sf")`) and use
+    `st_layers()` to report its layer name, feature count, and geometry
+    type. What is that layer's geometry column called? Then read the
+    equivalent shapefile (`system.file("shape/nc.shp", package = "sf")`)
+    and explain why both objects behave identically.
+7.  *(Challenge)* Use `st_is_valid()` on `africa_shp` and report how
+    many countries (if any) have invalid geometries. If any are invalid,
+    repair them with `st_make_valid()`.
+
+::: {.callout-note collapse="true"}
+## Model solution
+
+``` r
+library(sf)
+library(terra)
+library(dplyr)
+library(mlspatial)
+
+# 1. Built-in Africa shapefile
+data(africa_shp, package = "mlspatial")
+class(africa_shp)                       # "sf" "data.frame"
+dim(africa_shp)                         # 54 rows x 9 columns
+sf::st_geometry_type(africa_shp, by_geometry = FALSE)  # MULTIPOLYGON
+sf::st_crs(africa_shp)$epsg            # 3857
+
+# 2. Bundled Luxembourg shapefile
+lux <- sf::st_read(system.file("ex/lux.shp", package = "terra"), quiet = TRUE)
+nrow(lux)                               # 12 cantons
+sf::st_geometry_type(lux, by_geometry = FALSE)  # POLYGON
+
+# 3. Bundled elevation raster
+elev <- terra::rast(system.file("ex/elev.tif", package = "terra"))
+terra::res(elev)                        # 0.008333333 0.008333333
+terra::ext(elev)                        # 5.741667 6.533333 49.44167 50.19167
+terra::crs(elev, describe = TRUE)$code  # 4326
+
+# 4. Reproject
+elev_web <- terra::project(elev, "EPSG:3857")
+terra::crs(elev_web, describe = TRUE)$code  # 3857
+
+# 5. Manual join
+data(panc_incidence, package = "mlspatial")
+africa_fixed <- africa_shp |>
+  mutate(NAME = gsub("Côte d'Ivoire", "Cote d'Ivoire", NAME))
+africa_health2 <- dplyr::inner_join(africa_fixed, panc_incidence, by = "NAME")
+nrow(africa_health2)                    # 54
+
+# 6. GeoPackage shipped with sf
+gpkg_path <- system.file("gpkg/nc.gpkg", package = "sf")
+sf::st_layers(gpkg_path)                # layer "nc.gpkg", 100 features, MULTIPOLYGON
+nc_gpkg <- sf::st_read(gpkg_path, quiet = TRUE)
+names(nc_gpkg)[ncol(nc_gpkg)]           # "geom"
+
+nc_shp <- sf::st_read(system.file("shape/nc.shp", package = "sf"), quiet = TRUE)
+nrow(nc_shp)                            # 100 - same data, geometry column "geometry"
+
+# 7. Validity check
+sum(!sf::st_is_valid(africa_shp))       # number of invalid geometries
+africa_shp <- sf::st_make_valid(africa_shp)
+```
+:::
 
 ------------------------------------------------------------------------
 
@@ -219,8 +783,13 @@ buffers, distances, and GWR bandwidth selection. However Pseudo-Mercartor distor
 
 - [ ] All packages installed and loaded
 - [ ] `africa_shp` imported successfully
+- [ ] You can import an external shapefile with `st_read()`
+- [ ] You can read a GeoPackage and explain why `.gpkg` supersedes
+  `.shp`
+- [ ] You can import and preprocess an external raster with `terra`
 - [ ] `panc_incidence` loaded and inspected
 - [ ] `africa_health` created via `join_data()`
 - [ ] CRS verified and understood
+- [ ] Practical exercise completed
 
 **Next:** Proceed to [Module 2: Disease Mapping in R](02-mapping.qmd).
