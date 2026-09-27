@@ -449,7 +449,7 @@ on the very data it was trained on. A high R² here means the model
 *memorised* the training data, not that it learned a real relationship.
 Tree-based models in particular (especially XGBoost with enough rounds)
 can fit training data almost perfectly even when the true relationship is
-weak or nonexistent — exactly the scenario we have with our uncorrelated
+weak or non-existent — exactly the scenario we have with our uncorrelated
 simulated covariates. **A high in-sample R² is not evidence of a real
 relationship**; it is a reminder of why we need held-out cross-validation,
 which the next section does.
@@ -474,6 +474,7 @@ rf_cv <- train(
 )
 print(rf_cv)
 
+cat("\n")
 svr_cv <- train(
   rf_formula, data = ml_data, method = "svmRadial",
   trControl = cv_control, 
@@ -590,6 +591,11 @@ plot_obs_vs_pred(
   title = "SVR CV: Observed vs Predicted"
 )
 
+plot_obs_vs_pred(
+  observed = africa_health$incidence_rate,
+  predicted = africa_health$pred_xgb,
+  title = "XGB CV: Observed vs Predicted"
+)
 
 # Map predictions vs observed
 obs_map <- tm_shape(africa_health) +

@@ -5,6 +5,7 @@
 .DS_Store
 .quarto
 
+/slides-content_files/
 /.quarto/
 /_site/
 /_book/
@@ -15,5 +16,6 @@
 *.png
 *.jpg
 *.zip
-styles.css
 README.Rmd
+slides-content.html
+slides-content.md

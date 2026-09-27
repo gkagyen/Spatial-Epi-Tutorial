@@ -12,7 +12,7 @@ book:
   page-footer:
     left: "Copyright 2026, George K. Agyen"
     right: |
-      Thisbook was built with <a href="https://quarto.org/">Quarto</a>
+      This book was built with <a href="https://quarto.org/">Quarto</a>
   
   cover-image: Spat_epi.png
   favicon: Spat_epi.png
@@ -40,6 +40,7 @@ format:
     code-tools: true
     fig-width: 8
     fig-height: 6
+    date-modified: last-modified
     css: styles.css
     include-in-header:
       text: |
